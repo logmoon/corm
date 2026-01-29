@@ -14,4 +14,4 @@ thirdparty/sqlite/sqlite3.o: thirdparty/sqlite/sqlite3.c thirdparty/sqlite/sqlit
 	$(CC) -c thirdparty/sqlite/sqlite3.c -o thirdparty/sqlite/sqlite3.o
 
 clean:
-	rm -f corm *.db $(OBJS)
+	rm -f corm.exe *.db $(OBJS)

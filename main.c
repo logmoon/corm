@@ -20,6 +20,7 @@ typedef enum {
     FIELD_TYPE_FOREIGN_KEY
 } field_type_e;
 
+// TASK(20260129-122159) - Add custom validators
 typedef struct {
     const char* name;
     size_t offset;
@@ -82,7 +83,6 @@ enum {
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BOOL, \
      .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
 
-// Define a model - creates both the field array and model metadata
 #define DEFINE_MODEL(name, stype, ...) \
     static field_info_t name##_fields[] = {__VA_ARGS__}; \
     static model_meta_t name##_model = { \
@@ -92,6 +92,28 @@ enum {
         .field_count = sizeof(name##_fields) / sizeof(field_info_t), \
         .primary_key_field = NULL \
     }
+
+// =============================================================================
+// ORM FUNCTION DEFS
+// =============================================================================
+
+corm_db_t* corm_init(arena_t* arena, const char* db_filepath);
+void corm_deinit(arena_t* arena, corm_db_t* db);
+
+void corm_register_model(corm_db_t* db, model_meta_t* meta);
+// This is an internal thing, I think?
+// But we can still expose it I guess
+bool corm_create_table(corm_db_t* db, model_meta_t* meta);
+// Creates the tables from the cached model metas
+bool corm_sync(corm_db_t* db);
+
+// TASK(20260129-122159) - Rewrite base functions and add in new ones#Notes
+bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
+bool corm_delete(corm_db_t* db, model_meta_t* meta, int pk_value);
+
+void* corm_find(corm_db_t* db, model_meta_t* meta, int pk_value);
+void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count);
+void* corm_where(corm_db_t* db, model_meta_t* meta, const char* where_clause, int* count);
 
 // =============================================================================
 // ORM IMPLEMENTATION
@@ -124,319 +146,7 @@ void corm_deinit(arena_t* arena, corm_db_t* db) {
     sqlite3_close(db->db);
 }
 
-void corm_register_model(corm_db_t* db, model_meta_t* meta) {
-    if (db->model_count >= db->model_capacity) {
-        log_error("Model capacity exceeded");
-        return;
-    }
-    
-    // Find primary key field
-    for (u64 i = 0; i < meta->field_count; i++) {
-        if (meta->fields[i].flags & PRIMARY_KEY) {
-            meta->primary_key_field = meta->fields[i].name;
-            break;
-        }
-    }
-    
-    db->models[db->model_count++] = meta;
-}
-
-const char* corm_sql_type(field_info_t* field) {
-    switch (field->type) {
-        case FIELD_TYPE_INT:
-        case FIELD_TYPE_BOOL:
-            return "INTEGER";
-        case FIELD_TYPE_INT64:
-            return "BIGINT";
-        case FIELD_TYPE_FLOAT:
-        case FIELD_TYPE_DOUBLE:
-            return "REAL";
-        case FIELD_TYPE_STRING:
-            return field->max_length > 0 ? "VARCHAR" : "TEXT";
-        case FIELD_TYPE_BLOB:
-            return "BLOB";
-        default:
-            return "TEXT";
-    }
-}
-
-bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
-    temp_t temp = arena_start_temp(db->arena);
-    
-    // Start with "CREATE TABLE IF NOT EXISTS tablename ("
-    string_t sql = str_fmt(db->arena, "CREATE TABLE IF NOT EXISTS %s (", meta->table_name);
-    
-    for (u64 i = 0; i < meta->field_count; i++) {
-        field_info_t* field = &meta->fields[i];
-        
-        // Add comma separator
-        if (i > 0) {
-            sql = str_cat(db->arena, sql, STR_LIT(", "));
-        }
-        
-        // Add field definition
-        string_t field_def = str_fmt(db->arena, "%s %s", field->name, corm_sql_type(field));
-        sql = str_cat(db->arena, sql, field_def);
-        
-        // Add constraints
-        if (field->flags & PRIMARY_KEY) {
-            sql = str_cat(db->arena, sql, STR_LIT(" PRIMARY KEY"));
-        }
-        if (field->flags & AUTO_INC) {
-            sql = str_cat(db->arena, sql, STR_LIT(" AUTOINCREMENT"));
-        }
-        if (field->flags & NOT_NULL && !(field->flags & PRIMARY_KEY)) {
-            sql = str_cat(db->arena, sql, STR_LIT(" NOT NULL"));
-        }
-        if (field->flags & UNIQUE) {
-            sql = str_cat(db->arena, sql, STR_LIT(" UNIQUE"));
-        }
-    }
-    
-    sql = str_cat(db->arena, sql, STR_LIT(");"));
-    
-    log_info("Creating table: %s", str_to_c(sql));
-    
-    char* err_msg = NULL;
-    int rc = sqlite3_exec(db->db, str_to_c(sql), NULL, NULL, &err_msg);
-    
-    arena_end_temp(temp);
-    
-    if (rc != SQLITE_OK) {
-        log_error("SQL error: %s", err_msg);
-        sqlite3_free(err_msg);
-        return false;
-    }
-    
-    return true;
-}
-
-bool corm_sync(corm_db_t* db) {
-    for (u64 i = 0; i < db->model_count; i++) {
-        if (!corm_create_table(db, db->models[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
-    temp_t temp = arena_start_temp(db->arena);
-    
-    // Check if record exists
-    bool is_update = false;
-    void* pk_value = NULL;
-    
-    for (u64 i = 0; i < meta->field_count; i++) {
-        if (meta->fields[i].flags & PRIMARY_KEY) {
-            pk_value = (char*)instance + meta->fields[i].offset;
-            if (meta->fields[i].type == FIELD_TYPE_INT) {
-                is_update = (*(int*)pk_value != 0);
-            }
-            break;
-        }
-    }
-    
-    string_t sql;
-    
-    if (is_update) {
-        // UPDATE
-        sql = str_fmt(db->arena, "UPDATE %s SET ", meta->table_name);
-        
-        bool first = true;
-        for (u64 i = 0; i < meta->field_count; i++) {
-            field_info_t* field = &meta->fields[i];
-            if (field->flags & PRIMARY_KEY) continue;
-            
-            if (!first) {
-                sql = str_cat(db->arena, sql, STR_LIT(", "));
-            }
-            string_t field_set = str_fmt(db->arena, "%s = ?", field->name);
-            sql = str_cat(db->arena, sql, field_set);
-            first = false;
-        }
-        
-        string_t where = str_fmt(db->arena, " WHERE %s = ?", meta->primary_key_field);
-        sql = str_cat(db->arena, sql, where);
-    } else {
-        // INSERT
-        sql = str_fmt(db->arena, "INSERT INTO %s (", meta->table_name);
-        
-        // Field names
-        bool first = true;
-        for (u64 i = 0; i < meta->field_count; i++) {
-            field_info_t* field = &meta->fields[i];
-            if (field->flags & AUTO_INC) continue;
-            
-            if (!first) {
-                sql = str_cat(db->arena, sql, STR_LIT(", "));
-            }
-            sql = str_cat(db->arena, sql, str_from_cstring(db->arena, field->name));
-            first = false;
-        }
-        
-        sql = str_cat(db->arena, sql, STR_LIT(") VALUES ("));
-        
-        // Placeholders
-        first = true;
-        for (u64 i = 0; i < meta->field_count; i++) {
-            if (meta->fields[i].flags & AUTO_INC) continue;
-            
-            if (!first) {
-                sql = str_cat(db->arena, sql, STR_LIT(", "));
-            }
-            sql = str_cat(db->arena, sql, STR_LIT("?"));
-            first = false;
-        }
-        
-        sql = str_cat(db->arena, sql, STR_LIT(")"));
-    }
-    
-    log_info("SQL: %s", str_to_c(sql));
-    
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c(sql), -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        log_error("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(temp);
-        return false;
-    }
-    
-    // Bind parameters
-    int param_idx = 1;
-    for (u64 i = 0; i < meta->field_count; i++) {
-        field_info_t* field = &meta->fields[i];
-        
-        if (!is_update && (field->flags & AUTO_INC)) continue;
-        if (is_update && (field->flags & PRIMARY_KEY)) continue;
-        
-        void* field_ptr = (char*)instance + field->offset;
-        
-        switch (field->type) {
-            case FIELD_TYPE_INT:
-            case FIELD_TYPE_BOOL:
-                sqlite3_bind_int(stmt, param_idx++, *(int*)field_ptr);
-                break;
-            case FIELD_TYPE_INT64:
-                sqlite3_bind_int64(stmt, param_idx++, *(long long*)field_ptr);
-                break;
-            case FIELD_TYPE_FLOAT:
-                sqlite3_bind_double(stmt, param_idx++, *(float*)field_ptr);
-                break;
-            case FIELD_TYPE_DOUBLE:
-                sqlite3_bind_double(stmt, param_idx++, *(double*)field_ptr);
-                break;
-            case FIELD_TYPE_STRING: {
-                char* str = *(char**)field_ptr;
-                if (str) {
-                    sqlite3_bind_text(stmt, param_idx++, str, -1, SQLITE_TRANSIENT);
-                } else {
-                    sqlite3_bind_null(stmt, param_idx++);
-                }
-                break;
-            }
-            default:
-                sqlite3_bind_null(stmt, param_idx++);
-                break;
-        }
-    }
-    
-    // Bind primary key for UPDATE WHERE
-    if (is_update) {
-        for (u64 i = 0; i < meta->field_count; i++) {
-            if (meta->fields[i].flags & PRIMARY_KEY) {
-                void* field_ptr = (char*)instance + meta->fields[i].offset;
-                sqlite3_bind_int(stmt, param_idx++, *(int*)field_ptr);
-                break;
-            }
-        }
-    }
-    
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    arena_end_temp(temp);
-    
-    if (rc != SQLITE_DONE) {
-        log_error("Failed to execute: %s", sqlite3_errmsg(db->db));
-        return false;
-    }
-    
-    // Set auto-increment ID
-    if (!is_update) {
-        for (u64 i = 0; i < meta->field_count; i++) {
-            if (meta->fields[i].flags & AUTO_INC) {
-                void* field_ptr = (char*)instance + meta->fields[i].offset;
-                *(int*)field_ptr = (int)sqlite3_last_insert_rowid(db->db);
-                break;
-            }
-        }
-    }
-    
-    return true;
-}
-
-void* corm_find(corm_db_t* db, model_meta_t* meta, int pk_value) {
-    if (!meta->primary_key_field) {
-        log_error("Model has no primary key");
-        return NULL;
-    }
-    
-    string_t sql = str_fmt(db->arena, "SELECT * FROM %s WHERE %s = ?", 
-                          meta->table_name, meta->primary_key_field);
-    
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c(sql), -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        log_error("Failed to prepare: %s", sqlite3_errmsg(db->db));
-        return NULL;
-    }
-    
-    sqlite3_bind_int(stmt, 1, pk_value);
-    
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return NULL;
-    }
-    
-    void* instance = arena_alloc(db->arena, meta->struct_size);
-    
-    for (u64 i = 0; i < meta->field_count; i++) {
-        field_info_t* field = &meta->fields[i];
-        void* field_ptr = (char*)instance + field->offset;
-        
-        switch (field->type) {
-            case FIELD_TYPE_INT:
-            case FIELD_TYPE_BOOL:
-                *(int*)field_ptr = sqlite3_column_int(stmt, i);
-                break;
-            case FIELD_TYPE_INT64:
-                *(long long*)field_ptr = sqlite3_column_int64(stmt, i);
-                break;
-            case FIELD_TYPE_FLOAT:
-            case FIELD_TYPE_DOUBLE:
-                *(double*)field_ptr = sqlite3_column_double(stmt, i);
-                break;
-            case FIELD_TYPE_STRING: {
-                const unsigned char* text = sqlite3_column_text(stmt, i);
-                if (text) {
-                    size_t len = strlen((const char*)text);
-                    char* str = arena_alloc_array(db->arena, char, len + 1);
-                    strcpy(str, (const char*)text);
-                    *(char**)field_ptr = str;
-                } else {
-                    *(char**)field_ptr = NULL;
-                }
-                break;
-            }
-            default:
-                break;
-        }
-    }
-    
-    sqlite3_finalize(stmt);
-    return instance;
-}
+// TASK(20260129-122159) - Rewrite base functions and add in new ones
 
 // =============================================================================
 // MODEL DEFINITIONS

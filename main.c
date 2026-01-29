@@ -47,43 +47,51 @@ typedef struct {
     arena_t* arena;
 } corm_db_t;
 
-// Field flags
-#define PRIMARY_KEY (1 << 0)
-#define NOT_NULL    (1 << 1)
-#define UNIQUE      (1 << 2)
-#define AUTO_INC    (1 << 3)
+enum {
+    PRIMARY_KEY = (1 << 0),
+    NOT_NULL    = (1 << 1),
+    UNIQUE      = (1 << 2),
+    AUTO_INC    = (1 << 3),
+};
 
-// Macro expansions for different contexts
-#define FIELD_STRUCT(c_type, name, field_type, flags) c_type name;
+// =============================================================================
+// MODEL DEFINITION API
+// =============================================================================
 
-#define FIELD_INFO(c_type, name, field_type, flags) \
-    {#name, offsetof(ModelType, name), field_type, flags, 0, NULL, NULL, NULL},
+#define F_INT(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
 
-#define FIELD_COUNT(c_type, name, field_type, flags) +1
+#define F_INT64(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT64, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
 
-#define DEFINE_MODEL(ModelName, ...) \
-    typedef struct ModelName##_struct { \
-        __VA_ARGS__(FIELD_STRUCT) \
-    } ModelName; \
-    typedef ModelName ModelType; \
-    static field_info_t ModelName##_fields[] = { \
-        __VA_ARGS__(FIELD_INFO) \
-    }; \
-    static model_meta_t ModelName##_meta = { \
-        #ModelName, \
-        sizeof(ModelName), \
-        ModelName##_fields, \
-        0 __VA_ARGS__(FIELD_COUNT), \
-        NULL \
-    };
+#define F_FLOAT(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_FLOAT, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
 
-// Type-specific field macros
-#define FIELD_INT(F, name, flags)     F(int, name, FIELD_TYPE_INT, flags)
-#define FIELD_INT64(F, name, flags)   F(long long, name, FIELD_TYPE_INT64, flags)
-#define FIELD_FLOAT(F, name, flags)   F(float, name, FIELD_TYPE_FLOAT, flags)
-#define FIELD_DOUBLE(F, name, flags)  F(double, name, FIELD_TYPE_DOUBLE, flags)
-#define FIELD_STRING(F, name, flags)  F(char*, name, FIELD_TYPE_STRING, flags)
-#define FIELD_BOOL(F, name, flags)    F(bool, name, FIELD_TYPE_BOOL, flags)
+#define F_DOUBLE(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_DOUBLE, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+
+#define F_STRING(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+
+#define F_BOOL(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BOOL, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+
+// Define a model - creates both the field array and model metadata
+#define DEFINE_MODEL(name, stype, ...) \
+    static field_info_t name##_fields[] = {__VA_ARGS__}; \
+    static model_meta_t name##_model = { \
+        .table_name = #name, \
+        .struct_size = sizeof(stype), \
+        .fields = name##_fields, \
+        .field_count = sizeof(name##_fields) / sizeof(field_info_t), \
+        .primary_key_field = NULL \
+    }
 
 // =============================================================================
 // ORM IMPLEMENTATION
@@ -109,6 +117,11 @@ corm_db_t* corm_init(arena_t* arena, const char* db_filepath) {
     }
     
     return db;
+}
+
+void corm_deinit(arena_t* arena, corm_db_t* db) {
+    (void)arena;
+    sqlite3_close(db->db);
 }
 
 void corm_register_model(corm_db_t* db, model_meta_t* meta) {
@@ -426,15 +439,32 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, int pk_value) {
 }
 
 // =============================================================================
-// MODELS
+// MODEL DEFINITIONS
 // =============================================================================
 
-#define USER_FIELDS(F) \
-    FIELD_INT(F, id, PRIMARY_KEY | AUTO_INC) \
-    FIELD_STRING(F, name, NOT_NULL) \
-    FIELD_STRING(F, pwd_hash, NOT_NULL)
+typedef struct {
+    int id;
+    char* name;
+    char* pwd_hash;
+} User;
 
-DEFINE_MODEL(User, USER_FIELDS)
+DEFINE_MODEL(User, User,
+    F_INT(User, id, PRIMARY_KEY | AUTO_INC),
+    F_STRING(User, name, NOT_NULL),
+    F_STRING(User, pwd_hash, NOT_NULL)
+);
+
+typedef struct {
+    int id;
+    char* title;
+    char* content;
+} Post;
+
+DEFINE_MODEL(Post, Post,
+    F_INT(Post, id, PRIMARY_KEY | AUTO_INC),
+    F_STRING(Post, title, NOT_NULL),
+    F_STRING(Post, content, 0)
+);
 
 // =============================================================================
 // MAIN
@@ -444,23 +474,41 @@ int main() {
     arena_t* arena = arena_create(MiB(10));
     corm_db_t* db = corm_init(arena, "test.db");
     
-    corm_register_model(db, &User_meta);
+    // Register models
+    corm_register_model(db, &User_model);
+    corm_register_model(db, &Post_model);
     corm_sync(db);
     
+    // Test User
     User user = {0};
     user.name = "John Doe";
     user.pwd_hash = "hash123";
     
     log_info("Saving user...");
-    corm_save(db, &User_meta, &user);
+    corm_save(db, &User_model, &user);
     log_info("User saved with ID: %d", user.id);
     
-    User* found = corm_find(db, &User_meta, user.id);
-    if (found) {
-        log_info("Found user: id=%d, name=%s", found->id, found->name);
+    User* found_user = corm_find(db, &User_model, user.id);
+    if (found_user) {
+        log_info("Found user: id=%d, name=%s", found_user->id, found_user->name);
     }
     
-    sqlite3_close(db->db);
+    // Test Post
+    Post post = {0};
+    post.title = "My First Post";
+    post.content = "This is the content of my first post!";
+    
+    log_info("Saving post...");
+    corm_save(db, &Post_model, &post);
+    log_info("Post saved with ID: %d", post.id);
+    
+    Post* found_post = corm_find(db, &Post_model, post.id);
+    if (found_post) {
+        log_info("Found post: id=%d, title=%s", 
+                 found_post->id, found_post->title);
+    }
+    
+    corm_deinit(arena, db);
     arena_destroy(arena);
     return 0;
 }

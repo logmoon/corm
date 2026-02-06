@@ -1,15 +1,15 @@
 ---
 title: Real work begins
-state: open
+state: in_progress
 priority: 0
 created: 20260129-122159
 ---
 # Real work begins
 
 ## Rewrite base functions and add in new ones
-I've removed all the code from the functions, because I didn't write most of it, and I found myself getting lost in it. I've opted to rewrite it and add on it in one go.
+I've removed all the code from the functions, because I didn't write most of it, and I found myself getting lost in it. I've opted to rewrite it and add to it in one go.
 ### Notes
-- `corm_save` - This either does an `UPDATE` or `INSERT` operation based on what's bassed. We'd also like to add validation at the very start of the function to make sure what's passed is good; string max lengths, required fields, etc.
+- `corm_save` - This either does an `UPDATE` or `INSERT` operation based on what's passed. We'd also like to add validation at the very start of the function to make sure what's passed is good; string max lengths, required fields, etc.
 ## Add custom validators
 One cool thing is that we can add custom user defined validators to each field.
 Something like:

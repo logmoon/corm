@@ -21,7 +21,12 @@ typedef enum {
     FIELD_TYPE_FOREIGN_KEY
 } field_type_e;
 
-// TASK(20260129-122159) - Add custom validators
+typedef struct {
+    void* data;
+    size_t size;
+} blob_t;
+
+typedef bool (*validator_fn)(void* value, const char** error_msg);
 typedef struct {
     const char* name;
     size_t offset;
@@ -31,6 +36,7 @@ typedef struct {
     const char* foreign_table;
     const char* foreign_field;
     void* default_value;
+	validator_fn validator;
 } field_info_t;
 
 typedef struct {
@@ -38,7 +44,7 @@ typedef struct {
     size_t struct_size;
     field_info_t* fields;
     size_t field_count;
-    const char* primary_key_field;
+	field_info_t* primary_key_field;
 } model_meta_t;
 
 typedef struct {
@@ -49,6 +55,8 @@ typedef struct {
     arena_t* arena;
 } corm_db_t;
 
+// Flags
+#define NO_FLAGS 0
 enum {
     PRIMARY_KEY = (1 << 0),
     NOT_NULL    = (1 << 1),
@@ -77,79 +85,125 @@ typedef enum {
 // F_INT
 #define _F_INT_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_INT_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_INT_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_INT(...) _DISPATCH(_F_INT_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_INT64
 #define _F_INT64_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT64, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_INT64_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT64, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_INT64_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_INT64, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_INT64(...) _DISPATCH(_F_INT64_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_FLOAT
 #define _F_FLOAT_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_FLOAT, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_FLOAT_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_FLOAT, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_FLOAT_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_FLOAT, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_FLOAT(...) _DISPATCH(_F_FLOAT_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_DOUBLE
 #define _F_DOUBLE_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_DOUBLE, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_DOUBLE_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_DOUBLE, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_DOUBLE_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_DOUBLE, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_DOUBLE(...) _DISPATCH(_F_DOUBLE_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_STRING
 #define _F_STRING_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_STRING_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_STRING_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_STRING(...) _DISPATCH(_F_STRING_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_STRING_LEN
 #define _F_STRING_LEN_3(stype, fname, max_len) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
-     .flags = 0, .max_length = (max_len), .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = (max_len), .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_STRING_LEN_4(stype, fname, max_len, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
-     .flags = fflags, .max_length = (max_len), .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = (max_len), .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_STRING_LEN_5(stype, fname, max_len, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_STRING, \
+     .flags = fflags, .max_length = (max_len), .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_STRING_LEN(...) _DISPATCH(_F_STRING_LEN_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 // F_BOOL
 #define _F_BOOL_2(stype, fname) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BOOL, \
-     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
 
 #define _F_BOOL_3(stype, fname, fflags) \
     {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BOOL, \
-     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL}
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = NULL}
+
+#define _F_BOOL_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BOOL, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, .default_value = NULL, .validator = fvalidator}
 
 #define F_BOOL(...) _DISPATCH(_F_BOOL_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
+
+// F_BLOB
+#define _F_BLOB_2(stype, fname) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BLOB, \
+     .flags = 0, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, \
+     .default_value = NULL, .validator = NULL}
+
+#define _F_BLOB_3(stype, fname, fflags) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BLOB, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, \
+     .default_value = NULL, .validator = NULL}
+
+#define _F_BLOB_4(stype, fname, fflags, fvalidator) \
+    {.name = #fname, .offset = offsetof(stype, fname), .type = FIELD_TYPE_BLOB, \
+     .flags = fflags, .max_length = 0, .foreign_table = NULL, .foreign_field = NULL, \
+     .default_value = NULL, .validator = fvalidator}
+
+#define F_BLOB(...) _DISPATCH(_F_BLOB_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define DEFINE_MODEL(name, stype, ...) \
     static field_info_t name##_fields[] = {__VA_ARGS__}; \
@@ -169,12 +223,8 @@ corm_db_t* corm_init(arena_t* arena, const char* db_filepath);
 void corm_deinit(arena_t* arena, corm_db_t* db);
 
 bool corm_register_model(corm_db_t* db, model_meta_t* meta);
-bool corm_table_exists(corm_db_t* db, const char* table_name);
-bool corm_create_table(corm_db_t* db, model_meta_t* meta);
-// Creates the tables from the cached model metas
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 
-// TASK(20260129-122159) - Rewrite base functions and add in new ones#Notes
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
 bool corm_delete(corm_db_t* db, model_meta_t* meta, int pk_value);
 

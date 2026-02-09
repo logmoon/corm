@@ -30,12 +30,12 @@ void corm_deinit(arena_t* arena, corm_db_t* db) {
 // TASK(20260129-122159) - Rewrite base functions and add in new ones
 bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
 	// Find and validate primary key
-    const char* pk_field = NULL;
+	field_info_t* pk_field = NULL;
     int pk_count = 0;
     
     for (u64 i = 0; i < meta->field_count; i++) {
         if (meta->fields[i].flags & PRIMARY_KEY) {
-            pk_field = meta->fields[i].name;
+            pk_field = &meta->fields[i];
             pk_count++;
         }
     }
@@ -49,7 +49,7 @@ bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
         return false;
     }
     
-    meta->primary_key_field = pk_field;
+	meta->primary_key_field = pk_field;
 
 	// Register
 	// Not sure if we should resize, or throw an error here
@@ -112,7 +112,7 @@ bool corm_table_exists(corm_db_t* db, const char* table_name) {
     return exists;
 }
 
-bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
+static bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
 	temp_t tmp = arena_start_temp(db->arena);
 	string_t sql = str_fmt(db->arena, "CREATE TABLE IF NOT EXISTS %s (", meta->table_name);
 
@@ -168,7 +168,7 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
 				model_meta_t* meta = db->models[i];
 				bool existed = corm_table_exists(db, meta->table_name);
 				if (existed) {
-					log_info("  Table '%s' already exists (preserved existing schema)", meta->table_name);
+					log_info("  Table '%s' already exists (preserving existing schema)", meta->table_name);
 				} else {
 					if (!corm_create_table(db, meta)) {
 						return false;
@@ -217,9 +217,251 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
 	return true;
 }
 
-// TASK(20260129-122159) - Rewrite base functions and add in new ones#Notes
+static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* pk_field, void* pk_value) {
+    string_t sql = str_fmt(db->arena, "SELECT COUNT(*) FROM %s WHERE %s = ?;", 
+                          meta->table_name, meta->primary_key_field->name);
+    
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->arena, sql), -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        log_error("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
+        return false;
+    }
+    
+    switch (pk_field->type) {
+        case FIELD_TYPE_INT:
+        case FIELD_TYPE_BOOL:
+            sqlite3_bind_int(stmt, 1, *(int*)pk_value);
+            break;
+        case FIELD_TYPE_INT64:
+            sqlite3_bind_int64(stmt, 1, *(int64_t*)pk_value);
+            break;
+        case FIELD_TYPE_STRING: {
+            char* str = *(char**)pk_value;
+            sqlite3_bind_text(stmt, 1, str, -1, SQLITE_STATIC);
+            break;
+        }
+        case FIELD_TYPE_FLOAT:
+            sqlite3_bind_double(stmt, 1, (double)(*(float*)pk_value));
+            break;
+        case FIELD_TYPE_DOUBLE:
+            sqlite3_bind_double(stmt, 1, *(double*)pk_value);
+            break;
+        default:
+            log_error("Unsupported primary key type");
+            sqlite3_finalize(stmt);
+            return false;
+    }
+    
+    bool exists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        exists = sqlite3_column_int(stmt, 0) > 0;
+    }
+    
+    sqlite3_finalize(stmt);
+    return exists;
+}
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
-	return false;
+    temp_t tmp = arena_start_temp(db->arena);
+    
+    // Get pk field
+    field_info_t* pk_field = meta->primary_key_field;
+    // Lil sanity check
+    if (!pk_field) {
+        log_error("Primary key field not found in model '%s'", meta->table_name);
+        arena_end_temp(tmp);
+        return false;
+    }
+
+    // Validate custom validators
+    for (u64 i = 0; i < meta->field_count; i++) {
+        field_info_t* field = &meta->fields[i];
+        if (field->validator) {
+            void* field_value = (char*)instance + field->offset;
+            const char* error_msg = NULL;
+            if (!field->validator(field_value, &error_msg)) {
+                log_error("Validation failed for field '%s': %s", 
+                         field->name, error_msg ? error_msg : "Unknown error");
+                arena_end_temp(tmp);
+                return false;
+            }
+        }
+    }
+    
+    // Determine insert vs update
+    void* pk_value = (char*)instance + pk_field->offset;
+    bool is_update = corm_record_exists(db, meta, pk_field, pk_value);
+    
+    // Build SQL
+    string_t sql;
+    sqlite3_stmt* stmt;
+    
+    if (is_update) {
+        // UPDATE table SET field1=?, field2=?, ... WHERE pk_field=?
+        sql = str_fmt(db->arena, "UPDATE %s SET ", meta->table_name);
+        
+        bool first = true;
+        for (u64 i = 0; i < meta->field_count; i++) {
+            field_info_t* field = &meta->fields[i];
+            
+            // Skip PK and AUTO_INC fields
+            if (field->flags & PRIMARY_KEY || field->flags & AUTO_INC) {
+                continue;
+            }
+            
+            if (!first) {
+                sql = str_cat(db->arena, sql, STR_LIT(", "));
+            }
+            sql = str_cat(db->arena, sql, str_fmt(db->arena, "%s=?", field->name));
+            first = false;
+        }
+        
+        sql = str_cat(db->arena, sql, str_fmt(db->arena, " WHERE %s=?;", pk_field->name));
+    } else {
+        // INSERT INTO table (field1, field2, ...) VALUES (?, ?, ...)
+        sql = str_fmt(db->arena, "INSERT INTO %s (", meta->table_name);
+        string_t values = STR_LIT("VALUES (");
+        
+        bool first = true;
+        for (u64 i = 0; i < meta->field_count; i++) {
+            field_info_t* field = &meta->fields[i];
+            
+            // Skip AUTO_INC fields
+            if (field->flags & AUTO_INC) {
+                continue;
+            }
+            
+            if (!first) {
+                sql = str_cat(db->arena, sql, STR_LIT(", "));
+                values = str_cat(db->arena, values, STR_LIT(", "));
+            }
+            
+            sql = str_cat(db->arena, sql, str_fmt(db->arena, "%s", field->name));
+            values = str_cat(db->arena, values, STR_LIT("?"));
+            first = false;
+        }
+        
+        sql = str_cat(db->arena, sql, STR_LIT(") "));
+        values = str_cat(db->arena, values, STR_LIT(");"));
+        sql = str_cat(db->arena, sql, values);
+    }
+    
+    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->arena, sql), -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        log_error("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
+        arena_end_temp(tmp);
+        return false;
+    }
+    
+    // Bind  the values
+    int param_idx = 1;
+    for (u64 i = 0; i < meta->field_count; i++) {
+        field_info_t* field = &meta->fields[i];
+        
+        if (field->flags & AUTO_INC) {
+            continue;
+        }
+        
+        // For UPDATE, skip PK in the SET clause, we'll bind it later in WHERE
+        if (is_update && (field->flags & PRIMARY_KEY)) {
+            continue;
+        }
+        
+        void* field_value = (char*)instance + field->offset;
+        
+        switch (field->type) {
+            case FIELD_TYPE_INT:
+            case FIELD_TYPE_BOOL:
+                sqlite3_bind_int(stmt, param_idx, *(int*)field_value);
+                break;
+            case FIELD_TYPE_INT64:
+                sqlite3_bind_int64(stmt, param_idx, *(int64_t*)field_value);
+                break;
+            case FIELD_TYPE_FLOAT:
+                sqlite3_bind_double(stmt, param_idx, (double)(*(float*)field_value));
+                break;
+            case FIELD_TYPE_DOUBLE:
+                sqlite3_bind_double(stmt, param_idx, *(double*)field_value);
+                break;
+            case FIELD_TYPE_STRING: {
+                char* str = *(char**)field_value;
+                if (str) {
+                    sqlite3_bind_text(stmt, param_idx, str, -1, SQLITE_STATIC);
+                } else {
+                    sqlite3_bind_null(stmt, param_idx);
+                }
+                break;
+            }
+			case FIELD_TYPE_BLOB: {
+				blob_t* blob = (blob_t*)field_value;
+				if (blob && blob->data && blob->size > 0) {
+					sqlite3_bind_blob(stmt, param_idx, blob->data, (int)blob->size, SQLITE_STATIC);
+				} else {
+					sqlite3_bind_null(stmt, param_idx);
+				}
+				break;
+			}
+            default:
+                log_error("Unsupported field type for field '%s'", field->name);
+                sqlite3_finalize(stmt);
+                arena_end_temp(tmp);
+                return false;
+        }
+        
+        param_idx++;
+    }
+    
+    // For UPDATE, bind PK value in WHERE clause
+    if (is_update) {
+        switch (pk_field->type) {
+            case FIELD_TYPE_INT:
+            case FIELD_TYPE_BOOL:
+                sqlite3_bind_int(stmt, param_idx, *(int*)pk_value);
+                break;
+            case FIELD_TYPE_INT64:
+                sqlite3_bind_int64(stmt, param_idx, *(int64_t*)pk_value);
+                break;
+            case FIELD_TYPE_STRING: {
+                char* str = *(char**)pk_value;
+                sqlite3_bind_text(stmt, param_idx, str, -1, SQLITE_STATIC);
+                break;
+            }
+            case FIELD_TYPE_FLOAT:
+                sqlite3_bind_double(stmt, param_idx, (double)(*(float*)pk_value));
+                break;
+            case FIELD_TYPE_DOUBLE:
+                sqlite3_bind_double(stmt, param_idx, *(double*)pk_value);
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // Execute
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        log_error("Failed to execute %s: %s", is_update ? "UPDATE" : "INSERT", sqlite3_errmsg(db->db));
+        sqlite3_finalize(stmt);
+        arena_end_temp(tmp);
+        return false;
+    }
+    
+    // For INSERT with AUTO_INC, update the instance with the new ID
+    if (!is_update && (pk_field->flags & AUTO_INC)) {
+        int64_t last_id = sqlite3_last_insert_rowid(db->db);
+        
+        // Update the instance with the generated ID
+        void* pk_ptr = (char*)instance + pk_field->offset;
+        if (pk_field->type == FIELD_TYPE_INT) {
+            *(int*)pk_ptr = (int)last_id;
+        } else if (pk_field->type == FIELD_TYPE_INT64) {
+            *(int64_t*)pk_ptr = last_id;
+        }
+    }
+    
+    sqlite3_finalize(stmt);
+    arena_end_temp(tmp);
+    return true;
 }
 
 bool corm_delete(corm_db_t* db, model_meta_t* meta, int pk_value) {

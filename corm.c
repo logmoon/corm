@@ -542,7 +542,10 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
 	return NULL;
 }
 
-void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, size_t param_count, int* count) {
+void* corm_where_raw(corm_db_t* db, model_meta_t* meta,
+					 const char* where_clause, void** params,
+					 field_type_e* param_types, size_t param_count,
+					 int* count) {
 	return NULL;
 }
 

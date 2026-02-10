@@ -182,11 +182,11 @@ bool corm_register_model(corm_db_t* db, model_meta_t* meta);
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
-bool corm_delete(corm_db_t* db, model_meta_t* meta, int pk_value);
+bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value);
 
-void* corm_find(corm_db_t* db, model_meta_t* meta, int pk_value);
+void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
 void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count);
-void* corm_where(corm_db_t* db, model_meta_t* meta, const char* where_clause, int* count);
+void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, size_t param_count, int* count);
 
 bool corm_load_relation(corm_db_t* db, void* instance, model_meta_t* meta, const char* field_name);
 

@@ -119,6 +119,11 @@ static bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
     for (u64 i = 0; i < meta->field_count; i++) {
 		field_info_t* field = &meta->fields[i];
 
+		if (field->type == FIELD_TYPE_BELONGS_TO ||
+			field->type == FIELD_TYPE_HAS_MANY) {
+			continue;
+		}
+
 		if (i > 0) {
 			sql = str_cat(db->arena, sql, STR_LIT(", "));
 		}
@@ -133,13 +138,39 @@ static bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
         if (meta->fields[i].flags & NOT_NULL) {
 			sql = str_cat(db->arena, sql, STR_LIT(" NOT NULL"));
         }
-        if (meta->fields[i].flags & UNIQUE) {
+		if (meta->fields[i].flags & UNIQUE) {
 			sql = str_cat(db->arena, sql, STR_LIT(" UNIQUE"));
         }
         if (meta->fields[i].flags & AUTO_INC) {
 			sql = str_cat(db->arena, sql, STR_LIT(" AUTOINCREMENT"));
         }
     }
+
+	for (u64 i = 0; i < meta->field_count; i++) {
+		field_info_t* field = &meta->fields[i];
+
+		if (field->type == FIELD_TYPE_BELONGS_TO) {
+			string_t fk = str_fmt(db->arena, ", FOREIGN KEY (%s) REFERENCES %s(id)",
+				field->fk_column_name,
+				field->target_model_name
+			);
+			
+			switch(field->on_delete) {
+				case FK_CASCADE:
+					fk = str_cat(db->arena, fk, STR_LIT(" ON DELETE CASCADE"));
+					break;
+				case FK_SET_NULL:
+					fk = str_cat(db->arena, fk, STR_LIT(" ON DELETE SET NULL"));
+					break;
+				case FK_RESTRICT:
+					fk = str_cat(db->arena, fk, STR_LIT(" ON DELETE RESTRICT"));
+					break;
+				default: break;
+			}
+			
+			sql = str_cat(db->arena, sql, fk);
+		}
+	}
 
 	sql = str_cat(db->arena, sql, STR_LIT(");"));
 
@@ -159,7 +190,42 @@ static bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
 	return true;
 }
 
+static bool corm_resolve_relationships(corm_db_t* db) {
+    for (size_t i = 0; i < db->model_count; i++) {
+        model_meta_t* model = db->models[i];
+        
+        for (size_t j = 0; j < model->field_count; j++) {
+            field_info_t* field = &model->fields[j];
+            
+            if (field->type == FIELD_TYPE_BELONGS_TO || 
+                field->type == FIELD_TYPE_HAS_MANY) {
+                
+                // Find the related model
+                field->related_model = NULL;
+                for (size_t k = 0; k < db->model_count; k++) {
+                    if (strcmp(db->models[k]->table_name, 
+                              field->target_model_name) == 0) {
+                        field->related_model = db->models[k];
+                        break;
+                    }
+                }
+                
+                if (!field->related_model) {
+                    log_error("Related model '%s' not found for field '%s'",
+                             field->target_model_name, field->name);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
+	// Resolve relationships first
+	if (!corm_resolve_relationships(db)) {
+		return false;
+	}
+
 	switch(mode) {
 		case CORM_SYNC_SAFE:
 		{
@@ -478,4 +544,37 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
 
 void* corm_where(corm_db_t* db, model_meta_t* meta, const char* where_clause, int* count) {
 	return NULL;
+}
+
+static bool corm_load_belongs_to(corm_db_t* db, void* instance,
+								 model_meta_t* meta, field_info_t* field) {
+	return false;
+}
+static bool corm_load_has_many(corm_db_t* db, void* instance,
+								 model_meta_t* meta, field_info_t* field) {
+	return false;
+}
+bool corm_load_relation(corm_db_t* db, void* instance, 
+                        model_meta_t* meta, const char* field_name) {
+
+    field_info_t* field = NULL;
+    for (size_t i = 0; i < meta->field_count; i++) {
+        if (strcmp(meta->fields[i].name, field_name) == 0) {
+            field = &meta->fields[i];
+            break;
+        }
+    }
+    
+    if (!field) {
+		log_error("Field '%s' doesn't exist in %s", field_name, meta->table_name);
+		return false;
+	}
+    
+    if (field->type == FIELD_TYPE_BELONGS_TO) {
+        return corm_load_belongs_to(db, instance, meta, field);
+    } else if (field->type == FIELD_TYPE_HAS_MANY) {
+        return corm_load_has_many(db, instance, meta, field);
+    }
+    
+    return false;
 }

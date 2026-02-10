@@ -18,20 +18,37 @@ bool validate_password(void* value, const char** error_msg) {
     return true;
 }
 
-typedef struct {
+ typedef struct {
     int id;
-	int mat;
+    int mat;
     char* name;
     char* pwd;
-	blob_t profile_picture;
+    blob_t profile_picture;
 } User;
+
 
 DEFINE_MODEL(User, User,
     F_INT(User, id, PRIMARY_KEY | AUTO_INC),
     F_INT(User, mat),
     F_STRING(User, name),
     F_STRING_LEN(User, pwd, 256, NOT_NULL, validate_password),
-	F_BLOB(User, profile_picture)
+    F_BLOB(User, profile_picture)
+);
+
+
+typedef struct {
+    int id;
+    char* bio;
+    int user_id;
+    User* user;
+} Profile;
+
+
+DEFINE_MODEL(Profile, Profile,
+    F_INT(Profile, id, PRIMARY_KEY | AUTO_INC),
+    F_STRING_LEN(Profile, bio, 200),
+	F_INT(Profile, user_id, UNIQUE | NOT_NULL),
+    F_BELONGS_TO(Profile, user, User, user_id)
 );
 
 // =============================================================================
@@ -48,7 +65,17 @@ int main() {
 		arena_destroy(arena);
 		return 1;
 	}
-    corm_sync(db, CORM_SYNC_DROP);
+    if (!corm_register_model(db, &Profile_model)) {
+		corm_deinit(arena, db);
+		arena_destroy(arena);
+		return 1;
+	}
+
+    if (!corm_sync(db, CORM_SYNC_DROP)) {
+		corm_deinit(arena, db);
+		arena_destroy(arena);
+		return 1;
+	}
 
 	FILE* f = fopen("avatar.jpg", "rb");
 	fseek(f, 0, SEEK_END);
@@ -64,7 +91,6 @@ int main() {
 	user.profile_picture = (blob_t){ .data = data, .size = size };
     user.pwd = "12345678";
     
-    log_info("Saving user...");
     if (!corm_save(db, &User_model, &user)) {
 		corm_deinit(arena, db);
 		arena_destroy(arena);

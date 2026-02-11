@@ -10,6 +10,10 @@
 #include "log.utils/lu_string.h"
 #include "thirdparty/sqlite/sqlite3.h"
 
+#ifndef CORM_MAX_MODELS
+#define CORM_MAX_MODELS 128
+#endif
+
 typedef enum {
     FIELD_TYPE_INT,
     FIELD_TYPE_INT64,
@@ -62,12 +66,29 @@ typedef struct model_meta_t {
     field_info_t* primary_key_field;
 } model_meta_t;
 
+// Default allocator/free funcs
+#ifndef CORM_MALLOC
+#define CORM_MALLOC malloc
+#endif
+
+#ifndef CORM_FREE
+#define CORM_FREE free
+#endif
+
+// Custom allocators can also be passed:
+typedef struct {
+    void* (*alloc_fn)(void* ctx, size_t size);
+    void (*free_fn)(void* ctx, void* ptr);
+    void* ctx;
+} corm_allocator_t;
+
 typedef struct {
     sqlite3* db;
+    arena_t* internal_arena;
+	corm_allocator_t allocator;
     model_meta_t** models;
     size_t model_count;
     size_t model_capacity;
-    arena_t* arena;
 } corm_db_t;
 
 #define NO_FLAGS 0
@@ -158,7 +179,14 @@ typedef enum {
 #define F_BELONGS_TO(stype, fname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_BELONGS_TO), .target_model_name = #target, .fk_column_name = #fk }
 
-#define F_HAS_MANY(stype, fname, cname, target, fk) \
+#define MANY(name) \
+	int name##_count; \
+	void* name
+#define F_HAS_MANY(stype, fname, target, fk) \
+    { _BASE_FIELD(stype, fname, FIELD_TYPE_HAS_MANY), .target_model_name = #target, .fk_column_name = #fk, .count_offset = offsetof(stype, fname##_count) }
+
+// Explicitly define the count
+#define F_HAS_MANY_COUNT(stype, fname, cname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_HAS_MANY), .target_model_name = #target, .fk_column_name = #fk, .count_offset = offsetof(stype, cname) }
 
 #define DEFINE_MODEL(name, stype, ...) \
@@ -175,8 +203,17 @@ typedef enum {
 // ORM FUNCTION DEFS
 // =============================================================================
 
-corm_db_t* corm_init(arena_t* arena, const char* db_filepath);
-void corm_deinit(arena_t* arena, corm_db_t* db);
+corm_db_t* corm_init(const char* db_filepath);
+
+corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
+									void* (*alloc_fn)(void*, size_t),
+									void (*free_fn)(void*, void*));
+
+void corm_set_allocator(corm_db_t* db, void* ctx,
+						void* (*alloc_fn)(void*, size_t),
+                        void (*free_fn)(void*, void*));
+
+void corm_close(corm_db_t* db);
 
 bool corm_register_model(corm_db_t* db, model_meta_t* meta);
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
@@ -188,6 +225,8 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
 void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count);
 void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count, int* count);
 
-bool corm_load_relation(corm_db_t* db, void* instance, model_meta_t* meta, const char* field_name);
+bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name);
+
+void corm_free(corm_db_t* db, model_meta_t* meta, void* instance);
 
 #endif

@@ -22,6 +22,7 @@ static inline void corm_free_fn(corm_db_t* db, void* ptr) {
     // No custom allocator, so we use default CORM_FREE
     CORM_FREE(ptr);
 }
+
 // =============================================================================
 // INIT/CLEANUP
 // =============================================================================
@@ -99,9 +100,8 @@ void corm_close(corm_db_t* db) {
 }
 
 // =============================================================================
-// MODEL REGISTRATION
+// MODEL REGISTRATION AND CRUD
 // =============================================================================
-
 bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
 	// Find and validate primary key
 	field_info_t* pk_field = NULL;
@@ -696,7 +696,6 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
 // =============================================================================
 // QUERY FUNCTIONS
 // =============================================================================
-
 void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     temp_t tmp = arena_start_temp(db->internal_arena);
     

@@ -1,6 +1,6 @@
 ---
 title: Memory interface with user and allocation
-state: open
+state: closed
 priority: 0
 created: 20260211-005649
 ---

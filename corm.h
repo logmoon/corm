@@ -75,7 +75,7 @@ typedef struct model_meta_t {
 #define CORM_FREE free
 #endif
 
-// Custom allocators can also be passed:
+// A custom allocator can also be passed:
 typedef struct {
     void* (*alloc_fn)(void* ctx, size_t size);
     void (*free_fn)(void* ctx, void* ptr);
@@ -188,6 +188,10 @@ typedef enum {
 // Explicitly define the count
 #define F_HAS_MANY_COUNT(stype, fname, cname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_HAS_MANY), .target_model_name = #target, .fk_column_name = #fk, .count_offset = offsetof(stype, cname) }
+
+// =============================================================================
+// BASE DEFINE MODEL MACRO
+// =============================================================================
 
 #define DEFINE_MODEL(name, stype, ...) \
     static field_info_t name##_fields[] = {__VA_ARGS__}; \

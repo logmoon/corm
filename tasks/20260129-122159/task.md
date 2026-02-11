@@ -1,6 +1,6 @@
 ---
 title: Real work begins
-state: in_progress
+state: closed
 priority: 0
 created: 20260129-122159
 ---

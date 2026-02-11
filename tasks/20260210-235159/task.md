@@ -1,7 +1,7 @@
 ---
 title: DB Abstraction
 state: open
-priority: 0
+priority: 1
 created: 20260210-235159
 ---
 # DB Abstraction

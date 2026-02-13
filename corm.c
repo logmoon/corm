@@ -1,42 +1,162 @@
 #include "corm.h"
 
-// =============================================================================
-// ALLOCATION
-// =============================================================================
+#include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
+
+#define CORM_LOG_ERROR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
+#define CORM_LOG_WARN(fmt, ...)  fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
+#define CORM_LOG_INFO(fmt, ...)  fprintf(stdout, "[INFO] " fmt "\n", ##__VA_ARGS__)
+
+#define CORM_KIB(n) ((uint64_t)(n) << 10)
+#define CORM_MIB(n) ((uint64_t)(n) << 20)
+#define CORM_GIB(n) ((uint64_t)(n) << 30)
+
+#define CORM_ARENA_DEFAULT_ALIGN (sizeof(void*))
+#define CORM_ALIGN_UP(n, align) (((uint64_t)(n) + ((uint64_t)(align) - 1)) & ~((uint64_t)(align) - 1))
+
+struct corm_arena_t {
+    uint8_t* region;
+    uint64_t size;
+    uint64_t used;
+};
+
+typedef struct {
+    corm_arena_t* arena;
+    uint64_t checkpoint;
+} corm_temp_t;
+
+typedef struct {
+    uint8_t* str;
+    uint64_t size;
+} corm_string_t;
+
+#define CORM_STR_LIT(s) (corm_string_t){ (uint8_t*)(s), sizeof((s)) - 1 }
+
+static inline corm_arena_t* corm_arena_create(uint64_t size) {
+    if (size == 0) return NULL;
+    
+    corm_arena_t* arena = (corm_arena_t*)malloc(sizeof(corm_arena_t));
+    if (!arena) return NULL;
+    
+    arena->region = (uint8_t*)malloc(size);
+    if (!arena->region) {
+        free(arena);
+        return NULL;
+    }
+    
+    arena->size = size;
+    arena->used = 0;
+    
+    return arena;
+}
+
+static inline void* corm_arena_alloc(corm_arena_t* arena, uint64_t size) {
+    if (!arena || size == 0) return NULL;
+    
+    uint64_t aligned_pos = CORM_ALIGN_UP(arena->used, CORM_ARENA_DEFAULT_ALIGN);
+    uint64_t new_used = aligned_pos + size;
+    
+    if (new_used > arena->size) {
+        return NULL;
+    }
+    
+    arena->used = new_used;
+    void* result = arena->region + aligned_pos;
+    
+    memset(result, 0, size);
+    
+    return result;
+}
+
+static inline corm_temp_t corm_arena_start_temp(corm_arena_t* arena) {
+    return (corm_temp_t) {
+        .arena = arena,
+        .checkpoint = arena->used
+    };
+}
+
+static inline void corm_arena_end_temp(corm_temp_t temp) {
+    temp.arena->used = temp.checkpoint;
+}
+
+static inline void corm_arena_destroy(corm_arena_t* arena) {
+    if (!arena) return;
+    if (arena->region) {
+        free(arena->region);
+    }
+    free(arena);
+}
+
+static inline corm_string_t corm_str_fmt(corm_arena_t* arena, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+
+    if (len < 0) return (corm_string_t){0};
+
+    uint8_t* data = (uint8_t*)corm_arena_alloc(arena, len + 1);
+    
+    va_start(args, fmt);
+    vsnprintf((char*)data, len + 1, fmt, args);
+    va_end(args);
+
+    data[len] = 0;
+    return (corm_string_t){ data, (uint64_t)len };
+}
+
+static inline corm_string_t corm_str_cat(corm_arena_t* arena, corm_string_t a, corm_string_t b) {
+    uint64_t size = a.size + b.size;
+    uint8_t* data = (uint8_t*)corm_arena_alloc(arena, size + 1);
+    
+    memcpy(data, a.str, a.size);
+    memcpy(data + a.size, b.str, b.size);
+    data[size] = 0;
+    
+    return (corm_string_t){ data, size };
+}
+
+static inline const char* corm_str_to_c_safe(corm_arena_t* arena, corm_string_t s) {
+    if (s.str && s.str[s.size] == 0) {
+        return (const char*)s.str;
+    }
+    
+    uint8_t* data = (uint8_t*)corm_arena_alloc(arena, s.size + 1);
+    memcpy(data, s.str, s.size);
+    data[s.size] = 0;
+    return (const char*)data;
+}
+
+
 static inline void* corm_alloc_fn(corm_db_t* db, size_t size) {
     if (db->allocator.alloc_fn) {
         return db->allocator.alloc_fn(db->allocator.ctx, size);
     }
-    return CORM_MALLOC(size);  // fallback to defined macro
+    return CORM_MALLOC(size);
 }
+
 static inline void corm_free_fn(corm_db_t* db, void* ptr) {
-    // If using a custom allocator
     if (db->allocator.alloc_fn) {
-        // Use custom free if provided
         if (db->allocator.free_fn) {
             db->allocator.free_fn(db->allocator.ctx, ptr);
         }
-        // Otherwise no-op
         return;
     }
-    // No custom allocator, so we use default CORM_FREE
     CORM_FREE(ptr);
 }
 
-// =============================================================================
-// INIT/CLEANUP
-// =============================================================================
 corm_db_t* corm_init(const char* db_filepath) {
     return corm_init_with_allocator(db_filepath, NULL, NULL, NULL);
 }
 
 corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
-									void* (*alloc_fn)(void*, size_t),
-									void (*free_fn)(void*, void*)) {
+                                    void* (*alloc_fn)(void*, size_t),
+                                    void (*free_fn)(void*, void*)) {
 
     corm_db_t* db = CORM_MALLOC(sizeof(corm_db_t));
     if (db == NULL) {
-        log_error("Couldn't allocate db object");
+        CORM_LOG_ERROR("Couldn't allocate db object");
         return NULL;
     }
     
@@ -44,9 +164,9 @@ corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
     db->allocator.free_fn = free_fn;
     db->allocator.ctx = ctx;
     
-    db->internal_arena = arena_create(MiB(1));
+    db->internal_arena = corm_arena_create(CORM_MIB(1));
     if (db->internal_arena == NULL) {
-        log_error("Couldn't create internal arena");
+        CORM_LOG_ERROR("Couldn't create internal arena");
         CORM_FREE(db);
         return NULL;
     }
@@ -56,34 +176,34 @@ corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
     
     db->models = corm_alloc_fn(db, sizeof(model_meta_t*) * CORM_MAX_MODELS);
     if (db->models == NULL) {
-        log_error("Couldn't allocate models array");
-        arena_destroy(db->internal_arena);
+        CORM_LOG_ERROR("Couldn't allocate models array");
+        corm_arena_destroy(db->internal_arena);
         CORM_FREE(db);
         return NULL;
     }
     
     int rc = sqlite3_open(db_filepath, &db->db);
     if (rc != SQLITE_OK) {
-        log_error("Cannot open database: %s", sqlite3_errmsg(db->db));
+        CORM_LOG_ERROR("Cannot open database: %s", sqlite3_errmsg(db->db));
         sqlite3_close(db->db);
         corm_free_fn(db, db->models);
-        arena_destroy(db->internal_arena);
+        corm_arena_destroy(db->internal_arena);
         CORM_FREE(db);
         return NULL;
     }
 
-	char* err_msg = NULL;
-	rc = sqlite3_exec(db->db, "PRAGMA foreign_keys = ON;", NULL, NULL, &err_msg);
-	if (rc != SQLITE_OK) {
-		log_error("Failed to enable foreign keys: %s", err_msg);
-		sqlite3_free(err_msg);
-	}
+    char* err_msg = NULL;
+    rc = sqlite3_exec(db->db, "PRAGMA foreign_keys = ON;", NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        CORM_LOG_ERROR("Failed to enable foreign keys: %s", err_msg);
+        sqlite3_free(err_msg);
+    }
     
     return db;
 }
 
 void corm_set_allocator(corm_db_t* db, void* ctx,
-						void* (*alloc_fn)(void*, size_t),
+                        void* (*alloc_fn)(void*, size_t),
                         void (*free_fn)(void*, void*)) {
 
     db->allocator.ctx = ctx;
@@ -94,20 +214,16 @@ void corm_set_allocator(corm_db_t* db, void* ctx,
 void corm_close(corm_db_t* db) {
     if (!db) return;
     sqlite3_close(db->db);
-    arena_destroy(db->internal_arena);
+    corm_arena_destroy(db->internal_arena);
     corm_free_fn(db, db->models);
     CORM_FREE(db);
 }
 
-// =============================================================================
-// MODEL REGISTRATION AND CRUD
-// =============================================================================
 bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
-	// Find and validate primary key
-	field_info_t* pk_field = NULL;
+    field_info_t* pk_field = NULL;
     int pk_count = 0;
     
-    for (u64 i = 0; i < meta->field_count; i++) {
+    for (uint64_t i = 0; i < meta->field_count; i++) {
         if (meta->fields[i].flags & PRIMARY_KEY) {
             pk_field = &meta->fields[i];
             pk_count++;
@@ -115,45 +231,45 @@ bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
     }
     
     if (pk_count == 0) {
-        log_error("Model '%s' must have exactly one PRIMARY_KEY field", meta->table_name);
+        CORM_LOG_ERROR("Model '%s' must have exactly one PRIMARY_KEY field", meta->table_name);
         return false;
     }
     if (pk_count > 1) {
-        log_error("Model '%s' has %d PRIMARY_KEY fields, expected 1", meta->table_name, pk_count);
+        CORM_LOG_ERROR("Model '%s' has %d PRIMARY_KEY fields, expected 1", meta->table_name, pk_count);
         return false;
     }
     
-	meta->primary_key_field = pk_field;
+    meta->primary_key_field = pk_field;
 
     if (db->model_count >= db->model_capacity) {
-		log_error("Maximum number of models (%d) reached. Define CORM_MAX_MODELS to increase.",
+        CORM_LOG_ERROR("Maximum number of models (%d) reached. Define CORM_MAX_MODELS to increase.",
               CORM_MAX_MODELS);
-		return false;
+        return false;
     }
     
     db->models[db->model_count++] = meta;
-	return true;
+    return true;
 }
 
-static string_t corm_sql_type(arena_t* arena, field_info_t* field) {
+static corm_string_t corm_sql_type(corm_arena_t* arena, field_info_t* field) {
     switch (field->type) {
         case FIELD_TYPE_INT:
         case FIELD_TYPE_BOOL:
-            return STR_LIT("INTEGER");
+            return CORM_STR_LIT("INTEGER");
         case FIELD_TYPE_INT64:
-            return STR_LIT("BIGINT");
+            return CORM_STR_LIT("BIGINT");
         case FIELD_TYPE_FLOAT:
         case FIELD_TYPE_DOUBLE:
-            return STR_LIT("REAL");
+            return CORM_STR_LIT("REAL");
         case FIELD_TYPE_STRING:
             if (field->max_length > 0) {
-                return str_fmt(arena, "VARCHAR(%zu)", field->max_length);
+                return corm_str_fmt(arena, "VARCHAR(%zu)", field->max_length);
             }
-            return STR_LIT("TEXT");
+            return CORM_STR_LIT("TEXT");
         case FIELD_TYPE_BLOB:
-            return STR_LIT("BLOB");
+            return CORM_STR_LIT("BLOB");
         default:
-            return STR_LIT("TEXT");
+            return CORM_STR_LIT("TEXT");
     }
 }
 
@@ -178,81 +294,78 @@ static bool corm_table_exists(corm_db_t* db, const char* table_name) {
 }
 
 static bool corm_create_table(corm_db_t* db, model_meta_t* meta) {
-	temp_t tmp = arena_start_temp(db->internal_arena);
-	string_t sql = str_fmt(db->internal_arena, "CREATE TABLE IF NOT EXISTS %s (", meta->table_name);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "CREATE TABLE IF NOT EXISTS %s (", meta->table_name);
 
-    for (u64 i = 0; i < meta->field_count; i++) {
-		field_info_t* field = &meta->fields[i];
+    for (uint64_t i = 0; i < meta->field_count; i++) {
+        field_info_t* field = &meta->fields[i];
 
-		if (field->type == FIELD_TYPE_BELONGS_TO ||
-			field->type == FIELD_TYPE_HAS_MANY) {
-			continue;
-		}
+        if (field->type == FIELD_TYPE_BELONGS_TO ||
+            field->type == FIELD_TYPE_HAS_MANY) {
+            continue;
+        }
 
-		if (i > 0) {
-			sql = str_cat(db->internal_arena, sql, STR_LIT(", "));
-		}
+        if (i > 0) {
+            sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(", "));
+        }
 
-		string_t type = corm_sql_type(db->internal_arena, field);
-		string_t new_field = str_fmt(db->internal_arena, "%s %s", field->name, str_to_c_safe(db->internal_arena, type));
+        corm_string_t type = corm_sql_type(db->internal_arena, field);
+        corm_string_t new_field = corm_str_fmt(db->internal_arena, "%s %s", field->name, corm_str_to_c_safe(db->internal_arena, type));
 
-		sql = str_cat(db->internal_arena, sql, new_field);
+        sql = corm_str_cat(db->internal_arena, sql, new_field);
         if (meta->fields[i].flags & PRIMARY_KEY) {
-			sql = str_cat(db->internal_arena, sql, STR_LIT(" PRIMARY KEY"));
+            sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(" PRIMARY KEY"));
         }
         if (meta->fields[i].flags & NOT_NULL) {
-			sql = str_cat(db->internal_arena, sql, STR_LIT(" NOT NULL"));
+            sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(" NOT NULL"));
         }
-		if (meta->fields[i].flags & UNIQUE) {
-			sql = str_cat(db->internal_arena, sql, STR_LIT(" UNIQUE"));
+        if (meta->fields[i].flags & UNIQUE) {
+            sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(" UNIQUE"));
         }
         if (meta->fields[i].flags & AUTO_INC) {
-			sql = str_cat(db->internal_arena, sql, STR_LIT(" AUTOINCREMENT"));
+            sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(" AUTOINCREMENT"));
         }
     }
 
-	for (u64 i = 0; i < meta->field_count; i++) {
-		field_info_t* field = &meta->fields[i];
+    for (uint64_t i = 0; i < meta->field_count; i++) {
+        field_info_t* field = &meta->fields[i];
 
-		if (field->type == FIELD_TYPE_BELONGS_TO) {
-			string_t fk = str_fmt(db->internal_arena, ", FOREIGN KEY (%s) REFERENCES %s(id)",
-				field->fk_column_name,
-				field->target_model_name
-			);
-			
-			switch(field->on_delete) {
-				case FK_CASCADE:
-					fk = str_cat(db->internal_arena, fk, STR_LIT(" ON DELETE CASCADE"));
-					break;
-				case FK_SET_NULL:
-					fk = str_cat(db->internal_arena, fk, STR_LIT(" ON DELETE SET NULL"));
-					break;
-				case FK_RESTRICT:
-					fk = str_cat(db->internal_arena, fk, STR_LIT(" ON DELETE RESTRICT"));
-					break;
-				default: break;
-			}
-			
-			sql = str_cat(db->internal_arena, sql, fk);
-		}
-	}
+        if (field->type == FIELD_TYPE_BELONGS_TO) {
+            corm_string_t fk = corm_str_fmt(db->internal_arena, ", FOREIGN KEY (%s) REFERENCES %s(id)",
+                field->fk_column_name,
+                field->target_model_name
+            );
+            
+            switch(field->on_delete) {
+                case FK_CASCADE:
+                    fk = corm_str_cat(db->internal_arena, fk, CORM_STR_LIT(" ON DELETE CASCADE"));
+                    break;
+                case FK_SET_NULL:
+                    fk = corm_str_cat(db->internal_arena, fk, CORM_STR_LIT(" ON DELETE SET NULL"));
+                    break;
+                case FK_RESTRICT:
+                    fk = corm_str_cat(db->internal_arena, fk, CORM_STR_LIT(" ON DELETE RESTRICT"));
+                    break;
+                default: break;
+            }
+            
+            sql = corm_str_cat(db->internal_arena, sql, fk);
+        }
+    }
 
-	sql = str_cat(db->internal_arena, sql, STR_LIT(");"));
-
-	// Maybe hide this? Maybe use a versobe flag or sum?
-	log_info("  Running: %s", str_to_c(sql));
+    sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(");"));
 
     char *err_msg = NULL;
-	int rc = sqlite3_exec(db->db, str_to_c_safe(db->internal_arena, sql), NULL, NULL, &err_msg);
-	arena_end_temp(tmp);
+    int rc = sqlite3_exec(db->db, corm_str_to_c_safe(db->internal_arena, sql), NULL, NULL, &err_msg);
+    corm_arena_end_temp(tmp);
 
-	if (rc != SQLITE_OK) {
-		log_error("SQL error: %s", err_msg);
+    if (rc != SQLITE_OK) {
+        CORM_LOG_ERROR("SQL error: %s", err_msg);
         sqlite3_free(err_msg);
-		return false;
-	}
+        return false;
+    }
 
-	return true;
+    return true;
 }
 
 static bool corm_resolve_relationships(corm_db_t* db) {
@@ -265,7 +378,6 @@ static bool corm_resolve_relationships(corm_db_t* db) {
             if (field->type == FIELD_TYPE_BELONGS_TO || 
                 field->type == FIELD_TYPE_HAS_MANY) {
                 
-                // Find the related model
                 field->related_model = NULL;
                 for (size_t k = 0; k < db->model_count; k++) {
                     if (strcmp(db->models[k]->table_name, 
@@ -276,7 +388,7 @@ static bool corm_resolve_relationships(corm_db_t* db) {
                 }
                 
                 if (!field->related_model) {
-                    log_error("Related model '%s' not found for field '%s'",
+                    CORM_LOG_ERROR("Related model '%s' not found for field '%s'",
                              field->target_model_name, field->name);
                     return false;
                 }
@@ -286,82 +398,68 @@ static bool corm_resolve_relationships(corm_db_t* db) {
     return true;
 }
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
-	// Resolve relationships first
-	if (!corm_resolve_relationships(db)) {
-		return false;
-	}
+    if (!corm_resolve_relationships(db)) {
+        return false;
+    }
 
-	switch(mode) {
-		case CORM_SYNC_SAFE:
-		{
-			log_info("Syncing database (SAFE)");
-			for (u64 i = 0; i < db->model_count; ++i) {
-				model_meta_t* meta = db->models[i];
-				bool existed = corm_table_exists(db, meta->table_name);
-				if (existed) {
-					log_info("  Table '%s' already exists (preserving existing schema)", meta->table_name);
-				} else {
-					if (!corm_create_table(db, meta)) {
-						return false;
-					}
-					log_info("  Created table '%s'", meta->table_name);
-				}
-			}
-		}
-		break;
-		case CORM_SYNC_DROP:
-		{
-			log_info("Syncing database (DROP)");
-
-			// Disable ts temporarily so that we can drop
-			sqlite3_exec(db->db, "PRAGMA foreign_keys = OFF;", NULL, NULL, NULL);
-			// Drop all tables
-			for (u64 i = 0; i < db->model_count; ++i) {
-                temp_t tmp = arena_start_temp(db->internal_arena);
-                string_t drop_sql = str_fmt(db->internal_arena, "DROP TABLE IF EXISTS %s;", 
+    switch(mode) {
+        case CORM_SYNC_SAFE:
+        {
+            for (uint64_t i = 0; i < db->model_count; ++i) {
+                model_meta_t* meta = db->models[i];
+                bool existed = corm_table_exists(db, meta->table_name);
+                if (!existed) {
+                    if (!corm_create_table(db, meta)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        break;
+        case CORM_SYNC_DROP:
+        {
+            sqlite3_exec(db->db, "PRAGMA foreign_keys = OFF;", NULL, NULL, NULL);
+            for (uint64_t i = 0; i < db->model_count; ++i) {
+                corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
+                corm_string_t drop_sql = corm_str_fmt(db->internal_arena, "DROP TABLE IF EXISTS %s;", 
                                            db->models[i]->table_name);
                 char* err_msg = NULL;
-                int rc = sqlite3_exec(db->db, str_to_c_safe(db->internal_arena, drop_sql), NULL, NULL, &err_msg);
-				if (rc != SQLITE_OK) {
-					log_error("Failed to drop table '%s': %s", db->models[i]->table_name, err_msg);
-					sqlite3_free(err_msg);
-					arena_end_temp(tmp);
-					return false;
-				}
-				log_info("  Dropped table '%s'", db->models[i]->table_name);
-                arena_end_temp(tmp);
+                int rc = sqlite3_exec(db->db, corm_str_to_c_safe(db->internal_arena, drop_sql), NULL, NULL, &err_msg);
+                if (rc != SQLITE_OK) {
+                    CORM_LOG_ERROR("Failed to drop table '%s': %s", db->models[i]->table_name, err_msg);
+                    sqlite3_free(err_msg);
+                    corm_arena_end_temp(tmp);
+                    return false;
+                }
+                corm_arena_end_temp(tmp);
             }
-			// Re-enable
-			sqlite3_exec(db->db, "PRAGMA foreign_keys = ON;", NULL, NULL, NULL);
+            sqlite3_exec(db->db, "PRAGMA foreign_keys = ON;", NULL, NULL, NULL);
 
-			// Then recreate
-			for (u64 i = 0; i < db->model_count; ++i) {
-				if (!corm_create_table(db, db->models[i])) {
-					return false;
-				}
-				log_info("  Created table '%s'", db->models[i]->table_name);
-			}
-		}
-		break;
-		case CORM_SYNC_MIGRATE:
-		{
-			log_error("CORM_SYNC_MIGRATE is not implemented yet");
+            for (uint64_t i = 0; i < db->model_count; ++i) {
+                if (!corm_create_table(db, db->models[i])) {
+                    return false;
+                }
+            }
+        }
+        break;
+        case CORM_SYNC_MIGRATE:
+        {
+            CORM_LOG_ERROR("CORM_SYNC_MIGRATE is not implemented yet");
             return false;
-		}
-		break;
-	}
-	log_info("Sync complete!");
-	return true;
+        }
+        break;
+    }
+    return true;
 }
 
 static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* pk_field, void* pk_value) {
-    string_t sql = str_fmt(db->internal_arena, "SELECT COUNT(*) FROM %s WHERE %s = ?;", 
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT COUNT(*) FROM %s WHERE %s = ?;", 
                           meta->table_name, meta->primary_key_field->name);
     
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
+        CORM_LOG_ERROR("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
         return false;
     }
     
@@ -385,7 +483,7 @@ static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* 
             sqlite3_bind_double(stmt, 1, *(double*)pk_value);
             break;
         default:
-            log_error("Unsupported primary key type");
+            CORM_LOG_ERROR("Unsupported primary key type");
             sqlite3_finalize(stmt);
             return false;
     }
@@ -399,125 +497,111 @@ static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* 
     return exists;
 }
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
-    // Get pk field
     field_info_t* pk_field = meta->primary_key_field;
-    // Lil sanity check
     if (!pk_field) {
-        log_error("Primary key field not found in model '%s'", meta->table_name);
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Primary key field not found in model '%s'", meta->table_name);
+        corm_arena_end_temp(tmp);
         return false;
     }
 
-    // Validate custom validators
-    for (u64 i = 0; i < meta->field_count; i++) {
+    for (uint64_t i = 0; i < meta->field_count; i++) {
         field_info_t* field = &meta->fields[i];
         if (field->validator) {
             void* field_value = (char*)instance + field->offset;
             const char* error_msg = NULL;
             if (!field->validator(field_value, &error_msg)) {
-                log_error("Validation failed for field '%s': %s", 
+                CORM_LOG_ERROR("Validation failed for field '%s': %s", 
                          field->name, error_msg ? error_msg : "Unknown error");
-                arena_end_temp(tmp);
+                corm_arena_end_temp(tmp);
                 return false;
             }
         }
     }
     
-    // Determine insert vs update
     void* pk_value = (char*)instance + pk_field->offset;
     bool is_update = corm_record_exists(db, meta, pk_field, pk_value);
     
-    // Build SQL
-    string_t sql;
+    corm_string_t sql;
     sqlite3_stmt* stmt;
     
     if (is_update) {
-        // UPDATE table SET field1=?, field2=?, ... WHERE pk_field=?
-        sql = str_fmt(db->internal_arena, "UPDATE %s SET ", meta->table_name);
+        sql = corm_str_fmt(db->internal_arena, "UPDATE %s SET ", meta->table_name);
         
         bool first = true;
-        for (u64 i = 0; i < meta->field_count; i++) {
+        for (uint64_t i = 0; i < meta->field_count; i++) {
             field_info_t* field = &meta->fields[i];
 
-			// Skip relationship fields
             if (field->type == FIELD_TYPE_BELONGS_TO || 
                 field->type == FIELD_TYPE_HAS_MANY) {
                 continue;
             }
             
-            // Skip PK and AUTO_INC fields
             if (field->flags & PRIMARY_KEY || field->flags & AUTO_INC) {
                 continue;
             }
             
             if (!first) {
-                sql = str_cat(db->internal_arena, sql, STR_LIT(", "));
+                sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(", "));
             }
-            sql = str_cat(db->internal_arena, sql, str_fmt(db->internal_arena, "%s=?", field->name));
+            sql = corm_str_cat(db->internal_arena, sql, corm_str_fmt(db->internal_arena, "%s=?", field->name));
             first = false;
         }
         
-        sql = str_cat(db->internal_arena, sql, str_fmt(db->internal_arena, " WHERE %s=?;", pk_field->name));
+        sql = corm_str_cat(db->internal_arena, sql, corm_str_fmt(db->internal_arena, " WHERE %s=?;", pk_field->name));
     } else {
-        // INSERT INTO table (field1, field2, ...) VALUES (?, ?, ...)
-        sql = str_fmt(db->internal_arena, "INSERT INTO %s (", meta->table_name);
-        string_t values = STR_LIT("VALUES (");
+        sql = corm_str_fmt(db->internal_arena, "INSERT INTO %s (", meta->table_name);
+        corm_string_t values = CORM_STR_LIT("VALUES (");
         
         bool first = true;
-        for (u64 i = 0; i < meta->field_count; i++) {
+        for (uint64_t i = 0; i < meta->field_count; i++) {
             field_info_t* field = &meta->fields[i];
 
-			// Skip relationship fields
             if (field->type == FIELD_TYPE_BELONGS_TO || 
                 field->type == FIELD_TYPE_HAS_MANY) {
                 continue;
             }
 
-            // Skip AUTO_INC fields
             if (field->flags & AUTO_INC) {
                 continue;
             }
             
             if (!first) {
-                sql = str_cat(db->internal_arena, sql, STR_LIT(", "));
-                values = str_cat(db->internal_arena, values, STR_LIT(", "));
+                sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(", "));
+                values = corm_str_cat(db->internal_arena, values, CORM_STR_LIT(", "));
             }
             
-            sql = str_cat(db->internal_arena, sql, str_fmt(db->internal_arena, "%s", field->name));
-            values = str_cat(db->internal_arena, values, STR_LIT("?"));
+            sql = corm_str_cat(db->internal_arena, sql, corm_str_fmt(db->internal_arena, "%s", field->name));
+            values = corm_str_cat(db->internal_arena, values, CORM_STR_LIT("?"));
             first = false;
         }
         
-        sql = str_cat(db->internal_arena, sql, STR_LIT(") "));
-        values = str_cat(db->internal_arena, values, STR_LIT(");"));
-        sql = str_cat(db->internal_arena, sql, values);
+        sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(") "));
+        values = corm_str_cat(db->internal_arena, values, CORM_STR_LIT(");"));
+        sql = corm_str_cat(db->internal_arena, sql, values);
     }
     
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare statement: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return false;
     }
     
-    // Bind  the values
     int param_idx = 1;
-    for (u64 i = 0; i < meta->field_count; i++) {
+    for (uint64_t i = 0; i < meta->field_count; i++) {
         field_info_t* field = &meta->fields[i];
 
-		// Skip relationship fields
-		if (field->type == FIELD_TYPE_BELONGS_TO || 
-			field->type == FIELD_TYPE_HAS_MANY) {
-			continue;
-		}
+        if (field->type == FIELD_TYPE_BELONGS_TO || 
+            field->type == FIELD_TYPE_HAS_MANY) {
+            continue;
+        }
         
         if (field->flags & AUTO_INC) {
             continue;
         }
         
-        // For UPDATE, skip PK in the SET clause, we'll bind it later in WHERE
         if (is_update && (field->flags & PRIMARY_KEY)) {
             continue;
         }
@@ -547,26 +631,25 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
                 }
                 break;
             }
-			case FIELD_TYPE_BLOB: {
-				blob_t* blob = (blob_t*)field_value;
-				if (blob && blob->data && blob->size > 0) {
-					sqlite3_bind_blob(stmt, param_idx, blob->data, (int)blob->size, SQLITE_STATIC);
-				} else {
-					sqlite3_bind_null(stmt, param_idx);
-				}
-				break;
-			}
+            case FIELD_TYPE_BLOB: {
+                blob_t* blob = (blob_t*)field_value;
+                if (blob && blob->data && blob->size > 0) {
+                    sqlite3_bind_blob(stmt, param_idx, blob->data, (int)blob->size, SQLITE_STATIC);
+                } else {
+                    sqlite3_bind_null(stmt, param_idx);
+                }
+                break;
+            }
             default:
-                log_error("Unsupported field type for field '%s'", field->name);
+                CORM_LOG_ERROR("Unsupported field type for field '%s'", field->name);
                 sqlite3_finalize(stmt);
-                arena_end_temp(tmp);
+                corm_arena_end_temp(tmp);
                 return false;
         }
         
         param_idx++;
     }
     
-    // For UPDATE, bind PK value in WHERE clause
     if (is_update) {
         switch (pk_field->type) {
             case FIELD_TYPE_INT:
@@ -592,20 +675,17 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         }
     }
     
-    // Execute
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        log_error("Failed to execute %s: %s", is_update ? "UPDATE" : "INSERT", sqlite3_errmsg(db->db));
+        CORM_LOG_ERROR("Failed to execute %s: %s", is_update ? "UPDATE" : "INSERT", sqlite3_errmsg(db->db));
         sqlite3_finalize(stmt);
-        arena_end_temp(tmp);
+        corm_arena_end_temp(tmp);
         return false;
     }
     
-    // For INSERT with AUTO_INC, update the instance with the new ID
     if (!is_update && (pk_field->flags & AUTO_INC)) {
         int64_t last_id = sqlite3_last_insert_rowid(db->db);
         
-        // Update the instance with the generated ID
         void* pk_ptr = (char*)instance + pk_field->offset;
         if (pk_field->type == FIELD_TYPE_INT) {
             *(int*)pk_ptr = (int)last_id;
@@ -615,35 +695,34 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
     }
     
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     return true;
 }
 
 bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     if (!db || !meta || !pk_value) {
-        log_error("Invalid arguments to corm_delete");
+        CORM_LOG_ERROR("Invalid arguments to corm_delete");
         return false;
     }
     
     if (!meta->primary_key_field) {
-        log_error("Model '%s' has no primary key", meta->table_name);
+        CORM_LOG_ERROR("Model '%s' has no primary key", meta->table_name);
         return false;
     }
     
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
-    string_t sql = str_fmt(db->internal_arena, "DELETE FROM %s WHERE %s = ?;",
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "DELETE FROM %s WHERE %s = ?;",
                            meta->table_name, meta->primary_key_field->name);
     
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare DELETE: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare DELETE: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return false;
     }
     
-    // Bind primary key
     switch (meta->primary_key_field->type) {
         case FIELD_TYPE_INT:
         case FIELD_TYPE_BOOL:
@@ -669,44 +748,41 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
         }
             
         default:
-            log_error("Unsupported primary key type");
+            CORM_LOG_ERROR("Unsupported primary key type");
             sqlite3_finalize(stmt);
-            arena_end_temp(tmp);
+            corm_arena_end_temp(tmp);
             return false;
     }
     
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     
     if (rc != SQLITE_DONE) {
-        log_error("Failed to execute DELETE: %s", sqlite3_errmsg(db->db));
+        CORM_LOG_ERROR("Failed to execute DELETE: %s", sqlite3_errmsg(db->db));
         return false;
     }
     
     int rows_affected = sqlite3_changes(db->db);
     if (rows_affected == 0) {
-        log_warn("No rows deleted (record not found)");
+        CORM_LOG_WARN("No rows deleted (record not found)");
         return false;
     }
     
     return true;
 }
 
-// =============================================================================
-// QUERY FUNCTIONS
-// =============================================================================
 void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
-    string_t sql = str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = ?;",
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = ?;",
                           meta->table_name, meta->primary_key_field->name);
     
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare find query: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare find query: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
@@ -731,9 +807,9 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
             break;
         }
         default:
-            log_error("Unsupported primary key type");
+            CORM_LOG_ERROR("Unsupported primary key type");
             sqlite3_finalize(stmt);
-            arena_end_temp(tmp);
+            corm_arena_end_temp(tmp);
             return NULL;
     }
     
@@ -741,14 +817,14 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         instance = corm_alloc_fn(db, meta->struct_size);
         if (!instance) {
-            log_error("Failed to allocate instance");
+            CORM_LOG_ERROR("Failed to allocate instance");
             sqlite3_finalize(stmt);
-            arena_end_temp(tmp);
+            corm_arena_end_temp(tmp);
             return NULL;
         }
         memset(instance, 0, meta->struct_size);
         
-        for (u64 i = 0; i < meta->field_count; i++) {
+        for (uint64_t i = 0; i < meta->field_count; i++) {
             field_info_t* field = &meta->fields[i];
             
             if (field->type == FIELD_TYPE_BELONGS_TO || 
@@ -767,7 +843,7 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
             }
             
             if (col_idx == -1) {
-                log_warn("Column '%s' not found in result set", field->name);
+                CORM_LOG_WARN("Column '%s' not found in result set", field->name);
                 continue;
             }
             
@@ -821,29 +897,28 @@ void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
                 }
                 
                 default:
-                    log_warn("Unsupported field type for field '%s'", field->name);
+                    CORM_LOG_WARN("Unsupported field type for field '%s'", field->name);
                     break;
             }
         }
     }
     
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     
     return instance;
 }
 
 void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
-    // First, count how many records we have
-    string_t count_sql = str_fmt(db->internal_arena, "SELECT COUNT(*) FROM %s;", meta->table_name);
+    corm_string_t count_sql = corm_str_fmt(db->internal_arena, "SELECT COUNT(*) FROM %s;", meta->table_name);
     
     sqlite3_stmt* count_stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, count_sql), -1, &count_stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, count_sql), -1, &count_stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare count query: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare count query: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
@@ -855,28 +930,26 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
     
     if (record_count == 0) {
         if (count) *count = 0;
-        arena_end_temp(tmp);
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
-    // Allocate array for all instances
     void* instances = corm_alloc_fn(db, meta->struct_size * record_count);
     if (!instances) {
-        log_error("Failed to allocate instances array");
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to allocate instances array");
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     memset(instances, 0, meta->struct_size * record_count);
     
-    // Now query all records
-    string_t sql = str_fmt(db->internal_arena, "SELECT * FROM %s;", meta->table_name);
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s;", meta->table_name);
     
     sqlite3_stmt* stmt;
-    rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare find_all query: %s", sqlite3_errmsg(db->db));
+        CORM_LOG_ERROR("Failed to prepare find_all query: %s", sqlite3_errmsg(db->db));
         corm_free_fn(db, instances);
-        arena_end_temp(tmp);
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
@@ -884,7 +957,7 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
     while (sqlite3_step(stmt) == SQLITE_ROW && idx < record_count) {
         void* instance = (char*)instances + (idx * meta->struct_size);
         
-        for (u64 i = 0; i < meta->field_count; i++) {
+        for (uint64_t i = 0; i < meta->field_count; i++) {
             field_info_t* field = &meta->fields[i];
             
             if (field->type == FIELD_TYPE_BELONGS_TO || 
@@ -903,7 +976,7 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
             }
             
             if (col_idx == -1) {
-                log_warn("Column '%s' not found in result set", field->name);
+                CORM_LOG_WARN("Column '%s' not found in result set", field->name);
                 continue;
             }
             
@@ -957,7 +1030,7 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
                 }
                 
                 default:
-                    log_warn("Unsupported field type for field '%s'", field->name);
+                    CORM_LOG_WARN("Unsupported field type for field '%s'", field->name);
                     break;
             }
         }
@@ -966,7 +1039,7 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
     }
     
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     
     if (count) *count = record_count;
     return instances;
@@ -975,27 +1048,25 @@ void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count) {
 void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, 
                      void** params, field_type_e* param_types, size_t param_count, int* count) {
     if (!db || !meta || !where_clause || !count) {
-        log_error("Invalid arguments to corm_where_raw");
+        CORM_LOG_ERROR("Invalid arguments to corm_where_raw");
         return NULL;
     }
     
     *count = 0;
     
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
-    // Build SELECT query
-    string_t sql = str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s;", 
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s;", 
                            meta->table_name, where_clause);
     
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare WHERE query: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare WHERE query: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
-    // Bind parameters
     for (size_t i = 0; i < param_count; i++) {
         int bind_idx = i + 1;
         
@@ -1030,14 +1101,13 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
             }
                 
             default:
-                log_error("Unsupported parameter type %d at index %zu", param_types[i], i);
+                CORM_LOG_ERROR("Unsupported parameter type %d at index %zu", param_types[i], i);
                 sqlite3_finalize(stmt);
-                arena_end_temp(tmp);
+                corm_arena_end_temp(tmp);
                 return NULL;
         }
     }
     
-    // First pass: count results
     int result_count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         result_count++;
@@ -1045,28 +1115,26 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
     
     if (result_count == 0) {
         sqlite3_finalize(stmt);
-        arena_end_temp(tmp);
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     
     sqlite3_reset(stmt);
     
-    // Allocate array for results
     void* instances = corm_alloc_fn(db, meta->struct_size * result_count);
     if (!instances) {
-        log_error("Failed to allocate instances array");
+        CORM_LOG_ERROR("Failed to allocate instances array");
         sqlite3_finalize(stmt);
-        arena_end_temp(tmp);
+        corm_arena_end_temp(tmp);
         return NULL;
     }
     memset(instances, 0, meta->struct_size * result_count);
     
-    // Second pass: populate instances
     int idx = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && idx < result_count) {
         void* inst = (char*)instances + (idx * meta->struct_size);
         
-        for (u64 i = 0; i < meta->field_count; i++) {
+        for (uint64_t i = 0; i < meta->field_count; i++) {
             field_info_t* field = &meta->fields[i];
             
             if (field->type == FIELD_TYPE_BELONGS_TO || 
@@ -1085,7 +1153,7 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
             }
             
             if (col_idx == -1) {
-                log_warn("Column '%s' not found in result set", field->name);
+                CORM_LOG_WARN("Column '%s' not found in result set", field->name);
                 continue;
             }
             
@@ -1139,7 +1207,7 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
                 }
                 
                 default:
-                    log_warn("Unsupported field type for field '%s'", field->name);
+                    CORM_LOG_WARN("Unsupported field type for field '%s'", field->name);
                     break;
             }
         }
@@ -1148,7 +1216,7 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
     }
     
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     
     *count = result_count;
     return instances;
@@ -1156,7 +1224,6 @@ void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause
 
 static bool corm_load_belongs_to(corm_db_t* db, void* instance,
                                  model_meta_t* meta, field_info_t* field) {
-    // Find the foreign key field in the current model
     field_info_t* fk_field = NULL;
     for (size_t i = 0; i < meta->field_count; i++) {
         if (strcmp(meta->fields[i].name, field->fk_column_name) == 0) {
@@ -1166,20 +1233,18 @@ static bool corm_load_belongs_to(corm_db_t* db, void* instance,
     }
     
     if (!fk_field) {
-        log_error("Foreign key field '%s' not found in model '%s'", 
+        CORM_LOG_ERROR("Foreign key field '%s' not found in model '%s'", 
                  field->fk_column_name, meta->table_name);
         return false;
     }
     
     if (!field->related_model) {
-        log_error("Related model not resolved for field '%s'", field->name);
+        CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
         return false;
     }
     
-    // Get the foreign key value from the instance
     void* fk_value_ptr = (char*)instance + fk_field->offset;
     
-    // Check if FK is null (for nullable relationships)
     bool is_null = false;
     switch (fk_field->type) {
         case FIELD_TYPE_INT:
@@ -1197,21 +1262,18 @@ static bool corm_load_belongs_to(corm_db_t* db, void* instance,
     }
     
     if (is_null) {
-        // Set relation field to NULL
         void* relation_ptr = (char*)instance + field->offset;
         *(void**)relation_ptr = NULL;
         return true;
     }
     
-    // Load the related instance using corm_find
     void* related_instance = corm_find(db, field->related_model, fk_value_ptr);
     
     if (!related_instance) {
-        log_warn("Related instance not found for field '%s'", field->name);
+        CORM_LOG_WARN("Related instance not found for field '%s'", field->name);
         return false;
     }
     
-    // Store the pointer in the relationship field
     void* relation_ptr = (char*)instance + field->offset;
     *(void**)relation_ptr = related_instance;
     
@@ -1220,31 +1282,28 @@ static bool corm_load_belongs_to(corm_db_t* db, void* instance,
 
 static bool corm_load_has_many(corm_db_t* db, void* instance,
                                model_meta_t* meta, field_info_t* field) {
-    temp_t tmp = arena_start_temp(db->internal_arena);
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
     if (!field->related_model) {
-        log_error("Related model not resolved for field '%s'", field->name);
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
+        corm_arena_end_temp(tmp);
         return false;
     }
     
-    // Get this instance's primary key value
     void* pk_value = (char*)instance + meta->primary_key_field->offset;
     
-    // Build query: SELECT * FROM related_table WHERE fk_column = ?
-    string_t sql = str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = ?;",
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = ?;",
                           field->related_model->table_name,
                           field->fk_column_name);
     
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db->db, corm_str_to_c_safe(db->internal_arena, sql), -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_error("Failed to prepare has_many query: %s", sqlite3_errmsg(db->db));
-        arena_end_temp(tmp);
+        CORM_LOG_ERROR("Failed to prepare has_many query: %s", sqlite3_errmsg(db->db));
+        corm_arena_end_temp(tmp);
         return false;
     }
     
-    // Bind the primary key value
     field_info_t* pk_field = meta->primary_key_field;
     switch (pk_field->type) {
         case FIELD_TYPE_INT:
@@ -1266,38 +1325,35 @@ static bool corm_load_has_many(corm_db_t* db, void* instance,
             break;
         }
         default:
-            log_error("Unsupported primary key type");
+            CORM_LOG_ERROR("Unsupported primary key type");
             sqlite3_finalize(stmt);
-            arena_end_temp(tmp);
+            corm_arena_end_temp(tmp);
             return false;
     }
     
-    // First pass: count results
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         count++;
     }
     sqlite3_reset(stmt);
     
-    // Allocate array for results
     void* instances = NULL;
     if (count > 0) {
         instances = corm_alloc_fn(db, field->related_model->struct_size * count);
         if (!instances) {
-            log_error("Failed to allocate instances array");
+            CORM_LOG_ERROR("Failed to allocate instances array");
             sqlite3_finalize(stmt);
-            arena_end_temp(tmp);
+            corm_arena_end_temp(tmp);
             return false;
         }
         memset(instances, 0, field->related_model->struct_size * count);
     }
     
-    // Second pass: populate instances
     int idx = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && idx < count) {
         void* inst = (char*)instances + (idx * field->related_model->struct_size);
         
-        for (u64 i = 0; i < field->related_model->field_count; i++) {
+        for (uint64_t i = 0; i < field->related_model->field_count; i++) {
             field_info_t* rel_field = &field->related_model->fields[i];
             
             if (rel_field->type == FIELD_TYPE_BELONGS_TO || 
@@ -1316,7 +1372,7 @@ static bool corm_load_has_many(corm_db_t* db, void* instance,
             }
             
             if (col_idx == -1) {
-                log_warn("Column '%s' not found in result set", rel_field->name);
+                CORM_LOG_WARN("Column '%s' not found in result set", rel_field->name);
                 continue;
             }
             
@@ -1370,7 +1426,7 @@ static bool corm_load_has_many(corm_db_t* db, void* instance,
                 }
                 
                 default:
-                    log_warn("Unsupported field type for field '%s'", rel_field->name);
+                    CORM_LOG_WARN("Unsupported field type for field '%s'", rel_field->name);
                     break;
             }
         }
@@ -1379,13 +1435,11 @@ static bool corm_load_has_many(corm_db_t* db, void* instance,
     }
     
     sqlite3_finalize(stmt);
-    arena_end_temp(tmp);
+    corm_arena_end_temp(tmp);
     
-    // Store the array pointer in the relationship field
     void* relation_ptr = (char*)instance + field->offset;
     *(void**)relation_ptr = instances;
     
-    // Store the count
     void* count_ptr = (char*)instance + field->count_offset;
     *(int*)count_ptr = count;
     
@@ -1401,9 +1455,9 @@ bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const
     }
     
     if (!field) {
-		log_error("Field '%s' doesn't exist in %s", field_name, meta->table_name);
-		return false;
-	}
+        CORM_LOG_ERROR("Field '%s' doesn't exist in %s", field_name, meta->table_name);
+        return false;
+    }
     
     if (field->type == FIELD_TYPE_BELONGS_TO) {
         return corm_load_belongs_to(db, instance, meta, field);
@@ -1417,7 +1471,7 @@ bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const
 void corm_free(corm_db_t* db, model_meta_t* meta, void* instance) {
     if (!instance) return;
     
-    for (u64 i = 0; i < meta->field_count; i++) {
+    for (uint64_t i = 0; i < meta->field_count; i++) {
         field_info_t* field = &meta->fields[i];
         void* field_ptr = (char*)instance + field->offset;
         
@@ -1437,7 +1491,6 @@ void corm_free(corm_db_t* db, model_meta_t* meta, void* instance) {
                 break;
             }
             case FIELD_TYPE_BELONGS_TO: {
-                // Free the single related instance
                 void** related_ptr = (void**)field_ptr;
                 if (*related_ptr && field->related_model) {
                     corm_free(db, field->related_model, *related_ptr);
@@ -1445,20 +1498,16 @@ void corm_free(corm_db_t* db, model_meta_t* meta, void* instance) {
                 break;
             }
             case FIELD_TYPE_HAS_MANY: {
-                // Free the array of related instances
                 void** related_array = (void**)field_ptr;
                 if (*related_array && field->related_model) {
-                    // Get the count
                     void* count_ptr = (char*)instance + field->count_offset;
                     int count = *(int*)count_ptr;
                     
-                    // Free each instance in the array
                     for (int j = 0; j < count; j++) {
                         void* inst = (char*)(*related_array) + (j * field->related_model->struct_size);
                         corm_free(db, field->related_model, inst);
                     }
                     
-                    // Free the array itself
                     corm_free_fn(db, *related_array);
                 }
                 break;

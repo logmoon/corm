@@ -1,18 +1,26 @@
 #ifndef CORM_H_
 #define CORM_H_
 
-#define LU_LOGGER_ENABLED
-#define LU_LOGGER_SHOW_SOURCE
-#define LU_LOGGER_SHOW_DATE
-#define LU_LOGGER_LOG_TO_FILE
-#define LU_LOG_FILE_LEVEL_WARN
-#include "log.utils/lu_logger.h"
-#include "log.utils/lu_string.h"
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
 #include "thirdparty/sqlite/sqlite3.h"
 
 #ifndef CORM_MAX_MODELS
 #define CORM_MAX_MODELS 128
 #endif
+
+#ifndef CORM_MALLOC
+#define CORM_MALLOC malloc
+#endif
+
+#ifndef CORM_FREE
+#define CORM_FREE free
+#endif
+
+typedef struct corm_arena_t corm_arena_t;
 
 typedef enum {
     FIELD_TYPE_INT,
@@ -66,16 +74,6 @@ typedef struct model_meta_t {
     field_info_t* primary_key_field;
 } model_meta_t;
 
-// Default allocator/free funcs
-#ifndef CORM_MALLOC
-#define CORM_MALLOC malloc
-#endif
-
-#ifndef CORM_FREE
-#define CORM_FREE free
-#endif
-
-// A custom allocator can also be passed:
 typedef struct {
     void* (*alloc_fn)(void* ctx, size_t size);
     void (*free_fn)(void* ctx, void* ptr);
@@ -84,8 +82,8 @@ typedef struct {
 
 typedef struct {
     sqlite3* db;
-    arena_t* internal_arena;
-	corm_allocator_t allocator;
+    corm_arena_t* internal_arena;
+    corm_allocator_t allocator;
     model_meta_t** models;
     size_t model_count;
     size_t model_capacity;
@@ -105,10 +103,6 @@ typedef enum {
     CORM_SYNC_MIGRATE,
 } corm_sync_mode_e;
 
-// =============================================================================
-// INTERNAL MACROS
-// =============================================================================
-
 #define _NARGS_IMPL(_1,_2,_3,_4,_5,N,...) N
 #define _NARGS(...) _NARGS_IMPL(__VA_ARGS__, 5, 4, 3, 2, 1)
 
@@ -127,10 +121,6 @@ typedef enum {
     .count_offset = 0, \
     .on_delete = FK_NO_ACTION, \
     .related_model = NULL
-
-// =============================================================================
-// FIELD DEFINITION MACROS
-// =============================================================================
 
 #define _F_INT_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT) }
 #define _F_INT_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags }
@@ -172,26 +162,17 @@ typedef enum {
 #define _F_BLOB_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags, .validator = fval }
 #define F_BLOB(...) _DISPATCH(_F_BLOB_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
-// =============================================================================
-// RELATIONSHIP MACROS
-// =============================================================================
-
 #define F_BELONGS_TO(stype, fname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_BELONGS_TO), .target_model_name = #target, .fk_column_name = #fk }
 
 #define MANY(name) \
-	int name##_count; \
-	void* name
+    int name##_count; \
+    void* name
 #define F_HAS_MANY(stype, fname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_HAS_MANY), .target_model_name = #target, .fk_column_name = #fk, .count_offset = offsetof(stype, fname##_count) }
 
-// Explicitly define the count
 #define F_HAS_MANY_COUNT(stype, fname, cname, target, fk) \
     { _BASE_FIELD(stype, fname, FIELD_TYPE_HAS_MANY), .target_model_name = #target, .fk_column_name = #fk, .count_offset = offsetof(stype, cname) }
-
-// =============================================================================
-// BASE DEFINE MODEL MACRO
-// =============================================================================
 
 #define DEFINE_MODEL(name, stype, ...) \
     static field_info_t name##_fields[] = {__VA_ARGS__}; \
@@ -203,18 +184,14 @@ typedef enum {
         .primary_key_field = NULL \
     }
 
-// =============================================================================
-// ORM FUNCTION DEFS
-// =============================================================================
-
 corm_db_t* corm_init(const char* db_filepath);
 
 corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
-									void* (*alloc_fn)(void*, size_t),
-									void (*free_fn)(void*, void*));
+                                    void* (*alloc_fn)(void*, size_t),
+                                    void (*free_fn)(void*, void*));
 
 void corm_set_allocator(corm_db_t* db, void* ctx,
-						void* (*alloc_fn)(void*, size_t),
+                        void* (*alloc_fn)(void*, size_t),
                         void (*free_fn)(void*, void*));
 
 void corm_close(corm_db_t* db);

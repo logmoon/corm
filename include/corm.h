@@ -90,6 +90,15 @@ typedef struct corm_db_t {
     size_t model_capacity;
 } corm_db_t;
 
+typedef struct corm_result_t {
+    void* data;
+    int count;
+    model_meta_t* meta;
+    void** allocations;
+    size_t allocation_count;
+    size_t allocation_capacity;
+} corm_result_t;
+
 #define NO_FLAGS 0
 enum {
     PRIMARY_KEY = (1 << 0),
@@ -212,12 +221,12 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
 bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value);
 
-void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
-void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count);
-void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count, int* count);
+corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
+corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta);
+corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count);
 
-bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name);
+bool corm_load_relation(corm_db_t* db, corm_result_t* result, model_meta_t* meta, void* instance, const char* field_name);
 
-void corm_free(corm_db_t* db, model_meta_t* meta, void* instance);
+void corm_free_result(corm_db_t* db, corm_result_t* result);
 
 #endif // CORM_H_

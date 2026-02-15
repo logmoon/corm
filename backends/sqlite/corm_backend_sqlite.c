@@ -183,7 +183,7 @@ static bool sqlite_rollback(corm_backend_conn_t conn) {
 }
 
 // SQLite SQL dialect functions
-static const char* sqlite_get_type_name(field_type_e type, size_t max_length) {
+static const char* sqlite_get_type_name(field_type_e type, size_t max_length, char* buf, size_t buf_size) {
     switch (type) {
         case FIELD_TYPE_INT:
         case FIELD_TYPE_BOOL:
@@ -194,7 +194,11 @@ static const char* sqlite_get_type_name(field_type_e type, size_t max_length) {
         case FIELD_TYPE_DOUBLE:
             return "REAL";
         case FIELD_TYPE_STRING:
-            return max_length > 0 ? "TEXT" : "TEXT";
+            if (max_length > 0) {
+                snprintf(buf, buf_size, "VARCHAR(%zu)", max_length);
+                return buf;
+            }
+            return "TEXT";
         case FIELD_TYPE_BLOB:
             return "BLOB";
         default:
@@ -207,6 +211,7 @@ static const char* sqlite_get_auto_increment() {
 }
 
 static const char* sqlite_get_placeholder(int index) {
+	(void)index;
     return "?";
 }
 
@@ -222,6 +227,32 @@ static const char* sqlite_get_limit_syntax(int limit, int offset) {
         snprintf(buf, sizeof(buf), "LIMIT %d", limit);
     }
     return buf;
+}
+
+static bool sqlite_table_exists(corm_backend_conn_t conn, const char* table_name) {
+    const char* check_sql = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?;";
+    sqlite3_stmt* stmt;
+    
+    int rc = sqlite3_prepare_v2((sqlite3*)conn, check_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+    
+    sqlite3_bind_text(stmt, 1, table_name, -1, SQLITE_STATIC);
+    
+    bool exists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        exists = sqlite3_column_int(stmt, 0) > 0;
+    }
+    
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
+static bool sqlite_set_foreign_keys(corm_backend_conn_t conn, bool enabled) {
+    const char* sql = enabled ? "PRAGMA foreign_keys = ON;" : "PRAGMA foreign_keys = OFF;";
+    char* err = NULL;
+    return sqlite3_exec((sqlite3*)conn, sql, NULL, NULL, &err) == SQLITE_OK;
 }
 
 static corm_backend_ops_t sqlite_ops = {
@@ -258,6 +289,8 @@ static corm_backend_ops_t sqlite_ops = {
     .get_placeholder = sqlite_get_placeholder,
     .supports_returning = sqlite_supports_returning,
     .get_limit_syntax = sqlite_get_limit_syntax,
+    .table_exists = sqlite_table_exists,
+    .set_foreign_keys = sqlite_set_foreign_keys,
 };
 
 const corm_backend_ops_t* corm_backend_sqlite_init() {

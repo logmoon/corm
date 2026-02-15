@@ -62,15 +62,20 @@ typedef struct corm_backend_ops_t {
     bool (*rollback)(corm_backend_conn_t conn);
     
     // SQL dialect functions (for generating database-specific SQL)
-    const char* (*get_type_name)(field_type_e type, size_t max_length);
+    const char* (*get_type_name)(field_type_e type, size_t max_length, char* buf, size_t buf_size);
     const char* (*get_auto_increment)();
-    const char* (*get_placeholder)(int index); // Returns "?", "$1", etc.
+    const char* (*get_placeholder)(int index);
     bool (*supports_returning)();
     const char* (*get_limit_syntax)(int limit, int offset);
+    
+    // Database-specific utilities
+    bool (*table_exists)(corm_backend_conn_t conn, const char* table_name);
+    bool (*set_foreign_keys)(corm_backend_conn_t conn, bool enabled);
     
 } corm_backend_ops_t;
 
 // Backend registration - built-in backend(s)
 const corm_backend_ops_t* corm_backend_sqlite_init();
+// const corm_backend_ops_t* corm_backend_postgresql_init();
 
 #endif // CORM_BACKEND_H_

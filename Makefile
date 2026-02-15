@@ -32,6 +32,6 @@ thirdparty/sqlite/sqlite3.o: thirdparty/sqlite/sqlite3.c thirdparty/sqlite/sqlit
 	$(CC) -c thirdparty/sqlite/sqlite3.c -o thirdparty/sqlite/sqlite3.o
 
 clean:
-	rm -f corm.exe corm *.db $(OBJS)
+	rm -f corm.exe corm *.db $(TEST_OBJ) $(MAIN_OBJ) $(OBJS)
 
 .PHONY: clean

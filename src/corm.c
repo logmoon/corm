@@ -766,6 +766,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         }
     }
     
+	// TODO: Should be able to get an error message out of this is it fails
     int result = db->backend->step(stmt);
     if (result < 0) {
         CORM_LOG_ERROR("Failed to execute %s", is_update ? "UPDATE" : "INSERT");

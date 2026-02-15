@@ -33,7 +33,7 @@ typedef struct {
 
 #define CORM_STR_LIT(s) (corm_string_t){ (uint8_t*)(s), sizeof((s)) - 1 }
 
-// Arena allocator functions (unchanged from original)
+// Arena allocator functions
 static inline corm_arena_t* corm_arena_create(uint64_t size) {
     if (size == 0) return NULL;
     
@@ -377,7 +377,6 @@ static bool extract_field_from_column(corm_db_t* db, corm_result_t* result,
     return true;
 }
 
-// Helper function to bind a parameter based on field type
 static bool bind_param_by_type(corm_db_t* db, corm_backend_stmt_t stmt, int param_idx,
                                 void* value_ptr, field_type_e type) {
     switch (type) {
@@ -486,7 +485,6 @@ static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* 
     return exists;
 }
 
-// Generate CREATE TABLE SQL using backend dialect
 static corm_string_t corm_generate_create_table_sql(corm_db_t* db, model_meta_t* meta) {
     corm_string_t sql = corm_str_fmt(db->internal_arena, "CREATE TABLE IF NOT EXISTS %s (", meta->table_name);
     

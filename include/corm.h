@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-#include "thirdparty/sqlite/sqlite3.h"
+#include "corm_backend.h"
 
 #ifndef CORM_MAX_MODELS
 #define CORM_MAX_MODELS 128
@@ -22,7 +22,7 @@
 
 typedef struct corm_arena_t corm_arena_t;
 
-typedef enum {
+typedef enum field_type_e {
     FIELD_TYPE_INT,
     FIELD_TYPE_INT64,
     FIELD_TYPE_FLOAT,
@@ -50,7 +50,7 @@ typedef struct model_meta_t model_meta_t;
 
 typedef bool (*validator_fn)(void* value, const char** error_msg);
 
-typedef struct {
+typedef struct field_info_t {
     const char* name;
     size_t offset;
     field_type_e type;
@@ -80,14 +80,24 @@ typedef struct {
     void* ctx;
 } corm_allocator_t;
 
-typedef struct {
-    sqlite3* db;
+typedef struct corm_db_t {
+    corm_backend_conn_t backend_conn;
+    const corm_backend_ops_t* backend;
     corm_arena_t* internal_arena;
     corm_allocator_t allocator;
     model_meta_t** models;
     size_t model_count;
     size_t model_capacity;
 } corm_db_t;
+
+typedef struct corm_result_t {
+    void* data;
+    int count;
+    model_meta_t* meta;
+    void** allocations;
+    size_t allocation_count;
+    size_t allocation_capacity;
+} corm_result_t;
 
 #define NO_FLAGS 0
 enum {
@@ -190,6 +200,15 @@ corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
                                     void* (*alloc_fn)(void*, size_t),
                                     void (*free_fn)(void*, void*));
 
+corm_db_t* corm_init_with_backend(const corm_backend_ops_t* backend, 
+                                   const char* connection_string);
+
+corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backend,
+                                                 const char* connection_string,
+                                                 void* ctx,
+                                                 void* (*alloc_fn)(void*, size_t),
+                                                 void (*free_fn)(void*, void*));
+
 void corm_set_allocator(corm_db_t* db, void* ctx,
                         void* (*alloc_fn)(void*, size_t),
                         void (*free_fn)(void*, void*));
@@ -202,12 +221,12 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
 bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value);
 
-void* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
-void* corm_find_all(corm_db_t* db, model_meta_t* meta, int* count);
-void* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count, int* count);
+corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
+corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta);
+corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count);
 
-bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name);
+bool corm_load_relation(corm_db_t* db, corm_result_t* result, model_meta_t* meta, void* instance, const char* field_name);
 
-void corm_free(corm_db_t* db, model_meta_t* meta, void* instance);
+void corm_free_result(corm_db_t* db, corm_result_t* result);
 
-#endif
+#endif // CORM_H_

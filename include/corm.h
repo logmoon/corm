@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-#include "thirdparty/sqlite/sqlite3.h"
+#include "corm_backend.h"
 
 #ifndef CORM_MAX_MODELS
 #define CORM_MAX_MODELS 128
@@ -22,7 +22,7 @@
 
 typedef struct corm_arena_t corm_arena_t;
 
-typedef enum {
+typedef enum field_type_e {
     FIELD_TYPE_INT,
     FIELD_TYPE_INT64,
     FIELD_TYPE_FLOAT,
@@ -50,7 +50,7 @@ typedef struct model_meta_t model_meta_t;
 
 typedef bool (*validator_fn)(void* value, const char** error_msg);
 
-typedef struct {
+typedef struct field_info_t {
     const char* name;
     size_t offset;
     field_type_e type;
@@ -80,8 +80,9 @@ typedef struct {
     void* ctx;
 } corm_allocator_t;
 
-typedef struct {
-    sqlite3* db;
+typedef struct corm_db_t {
+    corm_backend_conn_t backend_conn;
+    const corm_backend_ops_t* backend;
     corm_arena_t* internal_arena;
     corm_allocator_t allocator;
     model_meta_t** models;
@@ -190,6 +191,15 @@ corm_db_t* corm_init_with_allocator(const char* db_filepath, void* ctx,
                                     void* (*alloc_fn)(void*, size_t),
                                     void (*free_fn)(void*, void*));
 
+corm_db_t* corm_init_with_backend(const corm_backend_ops_t* backend, 
+                                   const char* connection_string);
+
+corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backend,
+                                                 const char* connection_string,
+                                                 void* ctx,
+                                                 void* (*alloc_fn)(void*, size_t),
+                                                 void (*free_fn)(void*, void*));
+
 void corm_set_allocator(corm_db_t* db, void* ctx,
                         void* (*alloc_fn)(void*, size_t),
                         void (*free_fn)(void*, void*));
@@ -210,4 +220,4 @@ bool corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const
 
 void corm_free(corm_db_t* db, model_meta_t* meta, void* instance);
 
-#endif
+#endif // CORM_H_

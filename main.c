@@ -1,4 +1,5 @@
-#include "stdio.h"
+#include <stdio.h>
+
 #include "corm.h"
 
 typedef struct {
@@ -15,7 +16,7 @@ int main() {
 	corm_db_t* db = corm_init("test.db");
 
 	corm_register_model(db, &User_model);
-	corm_sync(db, CORM_SYNC_DROP);
+	corm_sync(db, CORM_SYNC_SAFE);
 
 	User user = {0};
 	user.name = "Amen";

@@ -225,7 +225,7 @@ corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
 corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta);
 corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count);
 
-bool corm_load_relation(corm_db_t* db, corm_result_t* result, model_meta_t* meta, void* instance, const char* field_name);
+corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name);
 
 void corm_free_result(corm_db_t* db, corm_result_t* result);
 

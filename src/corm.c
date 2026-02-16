@@ -1120,8 +1120,8 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     return true;
 }
 
-static bool corm_load_belongs_to(corm_db_t* db, corm_result_t* parent_result, void* instance,
-                                 model_meta_t* meta, field_info_t* field) {
+static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_meta_t* meta,
+								 field_info_t* field) {
     field_info_t* fk_field = NULL;
     for (size_t i = 0; i < meta->field_count; i++) {
         if (strcmp(meta->fields[i].name, field->fk_column_name) == 0) {
@@ -1176,41 +1176,14 @@ static bool corm_load_belongs_to(corm_db_t* db, corm_result_t* parent_result, vo
     
     void* related_instance = related_result->data;
     
-    if (!corm_result_track(db, parent_result, related_instance)) {
-        for (size_t i = 0; i < related_result->allocation_count; i++) {
-            corm_free_fn(db, related_result->allocations[i]);
-        }
-        corm_free_fn(db, related_result->allocations);
-        corm_free_fn(db, related_instance);
-        corm_free_fn(db, related_result);
-        return false;
-    }
-    
-    bool all_tracked = true;
-    for (size_t i = 0; i < related_result->allocation_count; i++) {
-        if (!corm_result_track(db, parent_result, related_result->allocations[i])) {
-            CORM_LOG_ERROR("Failed to track allocation %zu for related field '%s'", i, field->name);
-            all_tracked = false;
-            break;
-        }
-    }
-    
-    corm_free_fn(db, related_result->allocations);
-    corm_free_fn(db, related_result);
-    
-    if (!all_tracked) {
-        CORM_LOG_ERROR("Relation loading failed for field '%s', some allocations may leak", field->name);
-        return false;
-    }
-    
     void* relation_ptr = (char*)instance + field->offset;
     *(void**)relation_ptr = related_instance;
-    
-    return true;
+
+    return related_result;
 }
 
-static bool corm_load_has_many(corm_db_t* db, corm_result_t* parent_result, void* instance,
-                               model_meta_t* meta, field_info_t* field) {
+static corm_result_t* corm_load_has_many(corm_db_t* db, void* instance, model_meta_t* meta,
+										field_info_t* field) {
     corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
     if (!field->related_model) {
@@ -1220,6 +1193,11 @@ static bool corm_load_has_many(corm_db_t* db, corm_result_t* parent_result, void
     }
     
     void* pk_value = (char*)instance + meta->primary_key_field->offset;
+
+	// TODO: Maybe just call `corm_where_raw`
+	// We populate our instance with the result returned from it
+	// And then we return that result
+	// Just like in corm_load_belongs_to (but there we're using `corm_find` instead)
     
     const char* placeholder = db->backend->get_placeholder(1);
     corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = %s;",
@@ -1314,7 +1292,7 @@ static bool corm_load_has_many(corm_db_t* db, corm_result_t* parent_result, void
     return true;
 }
 
-bool corm_load_relation(corm_db_t* db, corm_result_t* result, model_meta_t* meta, void* instance, const char* field_name) {
+corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name) {
     field_info_t* field = NULL;
     for (size_t i = 0; i < meta->field_count; i++) {
         if (strcmp(meta->fields[i].name, field_name) == 0) {
@@ -1329,14 +1307,15 @@ bool corm_load_relation(corm_db_t* db, corm_result_t* result, model_meta_t* meta
     }
     
     if (field->type == FIELD_TYPE_BELONGS_TO) {
-        return corm_load_belongs_to(db, result, instance, meta, field);
+        return corm_load_belongs_to(db, instance, meta, field);
     } else if (field->type == FIELD_TYPE_HAS_MANY) {
-        return corm_load_has_many(db, result, instance, meta, field);
+        return corm_load_has_many(db, instance, meta, field);
     }
     
-    return false;
+    return NULL;
 }
 
+// TODO: Fool proof this shit
 void corm_free_result(corm_db_t* db, corm_result_t* result) {
     if (!result) return;
     

@@ -75,7 +75,6 @@ DEFINE_MODEL(Profile, Profile,
     F_BLOB(Profile, avatar)
 );
 
-// Product model (for testing various data types)
 typedef struct {
     int64_t id;
     char* name;

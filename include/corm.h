@@ -88,6 +88,7 @@ typedef struct corm_db_t {
     model_meta_t** models;
     size_t model_count;
     size_t model_capacity;
+    char last_error[512];
 } corm_db_t;
 
 typedef struct corm_result_t {
@@ -214,6 +215,8 @@ void corm_set_allocator(corm_db_t* db, void* ctx,
                         void (*free_fn)(void*, void*));
 
 void corm_close(corm_db_t* db);
+
+const char* corm_get_last_error(corm_db_t* db);
 
 bool corm_register_model(corm_db_t* db, model_meta_t* meta);
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);

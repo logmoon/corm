@@ -57,6 +57,7 @@ int main() {
 	first_user.is_active = true;
 
 	if (!corm_save(db, &User_model, &first_user)) {
+		printf("Error: %s\n", corm_get_last_error(db));
 		corm_close(db);
 		return 1;
 	}
@@ -68,6 +69,7 @@ int main() {
 	post.user_id = first_user.id;
 
 	if (!corm_save(db, &Post_model, &post)) {
+		printf("Error: %s\n", corm_get_last_error(db));
 		corm_close(db);
 		return 1;
 	}
@@ -75,10 +77,10 @@ int main() {
 
 	corm_result_t* user_result = corm_load_relation(db, &Post_model, &post, "user");
 	if (user_result == NULL) {
+		printf("Error: %s\n", corm_get_last_error(db));
 		corm_close(db);
 		return 1;
 	}
-
 	printf("Loaded user relation, username: %s\n", post.user->username);
 	
 	corm_free_result(db, user_result);

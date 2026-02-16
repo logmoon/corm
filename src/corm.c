@@ -4,9 +4,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#define CORM_LOG_ERROR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
-#define CORM_LOG_WARN(fmt, ...)  fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
-#define CORM_LOG_INFO(fmt, ...)  fprintf(stdout, "[INFO] " fmt "\n", ##__VA_ARGS__)
+#define CORM_SET_ERROR(db, fmt, ...) \
+    snprintf((db)->last_error, sizeof((db)->last_error), fmt, ##__VA_ARGS__)
 
 #define CORM_KIB(n) ((uint64_t)(n) << 10)
 #define CORM_MIB(n) ((uint64_t)(n) << 20)
@@ -216,13 +215,11 @@ corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backen
                                                  void* (*alloc_fn)(void*, size_t),
                                                  void (*free_fn)(void*, void*)) {
     if (!backend) {
-        CORM_LOG_ERROR("Backend cannot be NULL");
         return NULL;
     }
 
     corm_db_t* db = CORM_MALLOC(sizeof(corm_db_t));
     if (db == NULL) {
-        CORM_LOG_ERROR("Couldn't allocate db object");
         return NULL;
     }
     
@@ -233,7 +230,6 @@ corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backen
     
     db->internal_arena = corm_arena_create(CORM_MIB(1));
     if (db->internal_arena == NULL) {
-        CORM_LOG_ERROR("Couldn't create internal arena");
         CORM_FREE(db);
         return NULL;
     }
@@ -243,7 +239,6 @@ corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backen
     
     db->models = corm_alloc_fn(db, sizeof(model_meta_t*) * CORM_MAX_MODELS);
     if (db->models == NULL) {
-        CORM_LOG_ERROR("Couldn't allocate models array");
         corm_arena_destroy(db->internal_arena);
         CORM_FREE(db);
         return NULL;
@@ -252,15 +247,13 @@ corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backen
     // Connect to database using backend
     char* error = NULL;
     if (!backend->connect(&db->backend_conn, connection_string, &error)) {
-        CORM_LOG_ERROR("Cannot connect to database: %s", error ? error : "unknown error");
+        CORM_SET_ERROR(db, "Cannot connect to database: %s", error ? error : "unknown error");
         if (error) free(error);
         corm_free_fn(db, db->models);
         corm_arena_destroy(db->internal_arena);
         CORM_FREE(db);
         return NULL;
     }
-    
-    CORM_LOG_INFO("Connected to database using backend: %s", backend->name);
     
     return db;
 }
@@ -282,6 +275,11 @@ void corm_close(corm_db_t* db) {
     CORM_FREE(db);
 }
 
+const char* corm_get_last_error(corm_db_t* db) {
+    if (!db) return "Invalid database handle";
+    return db->last_error;
+}
+
 bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
     field_info_t* pk_field = NULL;
     int pk_count = 0;
@@ -294,18 +292,18 @@ bool corm_register_model(corm_db_t* db, model_meta_t* meta) {
     }
     
     if (pk_count == 0) {
-        CORM_LOG_ERROR("Model '%s' must have exactly one PRIMARY_KEY field", meta->table_name);
+        CORM_SET_ERROR(db, "Model '%s' must have exactly one PRIMARY_KEY field", meta->table_name);
         return false;
     }
     if (pk_count > 1) {
-        CORM_LOG_ERROR("Model '%s' has %d PRIMARY_KEY fields, expected 1", meta->table_name, pk_count);
+        CORM_SET_ERROR(db, "Model '%s' has %d PRIMARY_KEY fields, expected 1", meta->table_name, pk_count);
         return false;
     }
     
     meta->primary_key_field = pk_field;
 
     if (db->model_count >= db->model_capacity) {
-        CORM_LOG_ERROR("Maximum number of models (%d) reached. Define CORM_MAX_MODELS to increase.",
+        CORM_SET_ERROR(db, "Maximum number of models (%d) reached. Define CORM_MAX_MODELS to increase.",
                      (int)db->model_capacity);
         return false;
     }
@@ -370,7 +368,6 @@ static bool extract_field_from_column(corm_db_t* db, corm_result_t* result,
         }
         
         default:
-            CORM_LOG_WARN("Unsupported field type for extraction");
             return false;
     }
     
@@ -414,7 +411,7 @@ static bool bind_param_by_type(corm_db_t* db, corm_backend_stmt_t stmt, int para
         }
         
         default:
-            CORM_LOG_ERROR("Unsupported field type for binding");
+            CORM_SET_ERROR(db, "Unsupported field type for binding");
             return false;
     }
 }
@@ -439,7 +436,7 @@ static bool corm_resolve_relationships(corm_db_t* db) {
                 }
                 
                 if (!field->related_model) {
-                    CORM_LOG_ERROR("Related model '%s' not found for field '%s'",
+                    CORM_SET_ERROR(db, "Related model '%s' not found for field '%s'",
                              field->target_model_name, field->name);
                     return false;
                 }
@@ -463,7 +460,7 @@ static bool corm_record_exists(corm_db_t* db, model_meta_t* meta, field_info_t* 
     corm_backend_stmt_t stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare statement: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare statement: %s", error ? error : "unknown");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return false;
@@ -572,7 +569,7 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
                     corm_string_t create_sql = corm_generate_create_table_sql(db, meta);
                     char* error = NULL;
                     if (!db->backend->execute(db->backend_conn, corm_str_to_c_safe(db->internal_arena, create_sql), &error)) {
-                        CORM_LOG_ERROR("Failed to create table %s: %s", meta->table_name, error ? error : "unknown error");
+                        CORM_SET_ERROR(db, "Failed to create table %s: %s", meta->table_name, error ? error : "unknown error");
                         if (error) free(error);
                         return false;
                     }
@@ -591,7 +588,7 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
                                            db->models[i]->table_name);
                 char* error = NULL;
                 if (!db->backend->execute(db->backend_conn, corm_str_to_c_safe(db->internal_arena, drop_sql), &error)) {
-                    CORM_LOG_ERROR("Failed to drop table '%s': %s", db->models[i]->table_name, error ? error : "unknown");
+                    CORM_SET_ERROR(db, "Failed to drop table '%s': %s", db->models[i]->table_name, error ? error : "unknown");
                     if (error) free(error);
                     corm_arena_end_temp(tmp);
                     return false;
@@ -605,7 +602,7 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
                 corm_string_t create_sql = corm_generate_create_table_sql(db, db->models[i]);
                 char* error = NULL;
                 if (!db->backend->execute(db->backend_conn, corm_str_to_c_safe(db->internal_arena, create_sql), &error)) {
-                    CORM_LOG_ERROR("Failed to create table %s: %s", db->models[i]->table_name, error ? error : "unknown error");
+                    CORM_SET_ERROR(db, "Failed to create table %s: %s", db->models[i]->table_name, error ? error : "unknown error");
                     if (error) free(error);
                     return false;
                 }
@@ -615,7 +612,7 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode) {
         
         case CORM_SYNC_MIGRATE:
         {
-            CORM_LOG_ERROR("CORM_SYNC_MIGRATE is not implemented yet");
+            CORM_SET_ERROR(db, "CORM_SYNC_MIGRATE is not implemented yet");
             return false;
         }
         break;
@@ -628,7 +625,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
     
     field_info_t* pk_field = meta->primary_key_field;
     if (!pk_field) {
-        CORM_LOG_ERROR("Primary key field not found in model '%s'", meta->table_name);
+        CORM_SET_ERROR(db, "Primary key field not found in model '%s'", meta->table_name);
         corm_arena_end_temp(tmp);
         return false;
     }
@@ -639,7 +636,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
             void* field_value = (char*)instance + field->offset;
             const char* error_msg = NULL;
             if (!field->validator(field_value, &error_msg)) {
-                CORM_LOG_ERROR("Validation failed for field '%s': %s", 
+                CORM_SET_ERROR(db, "Validation failed for field '%s': %s", 
                          field->name, error_msg ? error_msg : "Unknown error");
                 corm_arena_end_temp(tmp);
                 return false;
@@ -723,7 +720,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
     
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare statement: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare %s: %s", is_update ? "UPDATE" : "INSERT", error ? error : "unknown");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return false;
@@ -749,7 +746,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         void* field_value = (char*)instance + field->offset;
         
         if (!bind_param_by_type(db, stmt, param_idx, field_value, field->type)) {
-            CORM_LOG_ERROR("Failed to bind parameter %d", param_idx);
+            CORM_SET_ERROR(db, "Failed to bind parameter %d for field '%s'", param_idx, field->name);
             db->backend->finalize(stmt);
             corm_arena_end_temp(tmp);
             return false;
@@ -766,10 +763,12 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         }
     }
     
-	// TODO: Should be able to get an error message out of this is it fails
     int result = db->backend->step(stmt);
     if (result < 0) {
-        CORM_LOG_ERROR("Failed to execute %s", is_update ? "UPDATE" : "INSERT");
+        const char* backend_err = db->backend->get_error(db->backend_conn);
+        CORM_SET_ERROR(db, "Failed to execute %s: %s", 
+                       is_update ? "UPDATE" : "INSERT",
+                       backend_err ? backend_err : "unknown error");
         db->backend->finalize(stmt);
         corm_arena_end_temp(tmp);
         return false;
@@ -804,14 +803,14 @@ corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     corm_backend_stmt_t stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare SELECT: %s", error ? error : "unknown error");
+        CORM_SET_ERROR(db, "Failed to prepare SELECT: %s", error ? error : "unknown error");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return NULL;
     }
     
     if (!bind_param_by_type(db, stmt, 1, pk_value, meta->primary_key_field->type)) {
-        CORM_LOG_ERROR("Failed to bind primary key");
+        CORM_SET_ERROR(db, "Failed to bind primary key");
         db->backend->finalize(stmt);
         corm_arena_end_temp(tmp);
         return NULL;
@@ -882,7 +881,7 @@ corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
     corm_backend_stmt_t count_stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &count_stmt, corm_str_to_c_safe(db->internal_arena, count_sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare count query: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare count query: %s", error ? error : "unknown");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return NULL;
@@ -909,7 +908,7 @@ corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
     if (!instances) {
         corm_free_fn(db, res->allocations);
         corm_free_fn(db, res);
-        CORM_LOG_ERROR("Failed to allocate instances array");
+        CORM_SET_ERROR(db, "Failed to allocate instances array");
         corm_arena_end_temp(tmp);
         return NULL;
     }
@@ -922,7 +921,7 @@ corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
     
     corm_backend_stmt_t stmt;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare find_all query: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare find_all query: %s", error ? error : "unknown");
         if (error) free(error);
         corm_free_fn(db, instances);
         corm_free_fn(db, res->allocations);
@@ -955,7 +954,6 @@ corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
             }
             
             if (col_idx == -1) {
-                CORM_LOG_WARN("Column '%s' not found in result set", field->name);
                 continue;
             }
             
@@ -974,7 +972,7 @@ corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
 corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, 
                      void** params, field_type_e* param_types, size_t param_count) {
     if (!db || !meta || !where_clause) {
-        CORM_LOG_ERROR("Invalid arguments to corm_where_raw");
+        CORM_SET_ERROR(db, "Invalid arguments to corm_where_raw");
         return NULL;
     }
     
@@ -986,7 +984,7 @@ corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* whe
     corm_backend_stmt_t stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare WHERE query: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare WHERE query: %s", error ? error : "unknown");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return NULL;
@@ -994,7 +992,7 @@ corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* whe
     
     for (size_t i = 0; i < param_count; i++) {
         if (!bind_param_by_type(db, stmt, i + 1, params[i], param_types[i])) {
-            CORM_LOG_ERROR("Failed to bind parameter %zu", i);
+            CORM_SET_ERROR(db, "Failed to bind parameter %zu", i);
             db->backend->finalize(stmt);
             corm_arena_end_temp(tmp);
             return NULL;
@@ -1023,7 +1021,7 @@ corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* whe
     
     void* instances = corm_alloc_fn(db, meta->struct_size * result_count);
     if (!instances) {
-        CORM_LOG_ERROR("Failed to allocate instances array");
+        CORM_SET_ERROR(db, "Failed to allocate instances array");
         corm_free_fn(db, res->allocations);
         corm_free_fn(db, res);
         db->backend->finalize(stmt);
@@ -1059,7 +1057,6 @@ corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* whe
             }
             
             if (col_idx == -1) {
-                CORM_LOG_WARN("Column '%s' not found in result set", field->name);
                 continue;
             }
             
@@ -1077,12 +1074,12 @@ corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* whe
 
 bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     if (!db || !meta || !pk_value) {
-        CORM_LOG_ERROR("Invalid arguments to corm_delete");
+        CORM_SET_ERROR(db, "Invalid arguments to corm_delete");
         return false;
     }
     
     if (!meta->primary_key_field) {
-        CORM_LOG_ERROR("Model '%s' has no primary key", meta->table_name);
+        CORM_SET_ERROR(db, "Model '%s' has no primary key", meta->table_name);
         return false;
     }
     
@@ -1095,14 +1092,14 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     corm_backend_stmt_t stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare DELETE: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare DELETE: %s", error ? error : "unknown");
         if (error) free(error);
         corm_arena_end_temp(tmp);
         return false;
     }
     
     if (!bind_param_by_type(db, stmt, 1, pk_value, meta->primary_key_field->type)) {
-        CORM_LOG_ERROR("Failed to bind primary key");
+        CORM_SET_ERROR(db, "Failed to bind primary key");
         db->backend->finalize(stmt);
         corm_arena_end_temp(tmp);
         return false;
@@ -1113,7 +1110,8 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     corm_arena_end_temp(tmp);
     
     if (result < 0) {
-        CORM_LOG_ERROR("Failed to execute DELETE: %s", db->backend->get_error(db->backend_conn));
+        const char* backend_err = db->backend->get_error(db->backend_conn);
+        CORM_SET_ERROR(db, "Failed to execute DELETE: %s", backend_err ? backend_err : "unknown error");
         return false;
     }
     
@@ -1131,13 +1129,13 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
     }
     
     if (!fk_field) {
-        CORM_LOG_ERROR("Foreign key field '%s' not found in model '%s'", 
+        CORM_SET_ERROR(db, "Foreign key field '%s' not found in model '%s'", 
                  field->fk_column_name, meta->table_name);
         return NULL;
     }
     
     if (!field->related_model) {
-        CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
+        CORM_SET_ERROR(db, "Related model not resolved for field '%s'", field->name);
         return NULL;
     }
     
@@ -1170,7 +1168,6 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
     corm_result_t* related_result = corm_find(db, field->related_model, fk_value_ptr);
     
     if (!related_result) {
-        CORM_LOG_WARN("Related instance not found for field '%s'", field->name);
         return NULL;
     }
     
@@ -1186,7 +1183,7 @@ static corm_result_t* corm_load_has_many(corm_db_t* db, void* instance, model_me
 										field_info_t* field) {
     
     if (!field->related_model) {
-        CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
+        CORM_SET_ERROR(db, "Related model not resolved for field '%s'", field->name);
         return NULL;
     }
     
@@ -1230,7 +1227,7 @@ corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* insta
     }
     
     if (!field) {
-        CORM_LOG_ERROR("Field '%s' doesn't exist in %s", field_name, meta->table_name);
+        CORM_SET_ERROR(db, "Field '%s' doesn't exist in %s", field_name, meta->table_name);
         return NULL;
     }
     

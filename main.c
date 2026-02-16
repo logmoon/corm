@@ -9,7 +9,6 @@ typedef struct {
 	bool is_active;
 } User;
 
-
 bool verify_email(void* email, const char** error_msg) {
 	return true;
 }

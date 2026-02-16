@@ -1133,12 +1133,12 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
     if (!fk_field) {
         CORM_LOG_ERROR("Foreign key field '%s' not found in model '%s'", 
                  field->fk_column_name, meta->table_name);
-        return false;
+        return NULL;
     }
     
     if (!field->related_model) {
         CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
-        return false;
+        return NULL;
     }
     
     void* fk_value_ptr = (char*)instance + fk_field->offset;
@@ -1164,14 +1164,14 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
     if (is_null) {
         void* relation_ptr = (char*)instance + field->offset;
         *(void**)relation_ptr = NULL;
-        return true;
+        return NULL;
     }
     
     corm_result_t* related_result = corm_find(db, field->related_model, fk_value_ptr);
     
     if (!related_result) {
         CORM_LOG_WARN("Related instance not found for field '%s'", field->name);
-        return false;
+        return NULL;
     }
     
     void* related_instance = related_result->data;
@@ -1184,112 +1184,40 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
 
 static corm_result_t* corm_load_has_many(corm_db_t* db, void* instance, model_meta_t* meta,
 										field_info_t* field) {
-    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
     
     if (!field->related_model) {
         CORM_LOG_ERROR("Related model not resolved for field '%s'", field->name);
-        corm_arena_end_temp(tmp);
-        return false;
+        return NULL;
     }
     
     void* pk_value = (char*)instance + meta->primary_key_field->offset;
 
-	// TODO: Maybe just call `corm_where_raw`
-	// We populate our instance with the result returned from it
-	// And then we return that result
-	// Just like in corm_load_belongs_to (but there we're using `corm_find` instead)
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
+
+	const char* placeholder = db->backend->get_placeholder(1);
+    corm_string_t where_clause = corm_str_fmt(db->internal_arena, "%s = %s", 
+                                              field->fk_column_name, placeholder);
     
-    const char* placeholder = db->backend->get_placeholder(1);
-    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s = %s;",
-                          field->related_model->table_name,
-                          field->fk_column_name,
-                          placeholder);
+    void* params[] = { pk_value };
+    field_type_e param_types[] = { meta->primary_key_field->type };
     
-    corm_backend_stmt_t stmt;
-    char* error = NULL;
-    if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_LOG_ERROR("Failed to prepare has_many query: %s", error ? error : "unknown");
-        if (error) free(error);
-        corm_arena_end_temp(tmp);
-        return false;
-    }
-    
-    if (!bind_param_by_type(db, stmt, 1, pk_value, meta->primary_key_field->type)) {
-        db->backend->finalize(stmt);
-        corm_arena_end_temp(tmp);
-        return false;
-    }
-    
-    int count = 0;
-    while (db->backend->step(stmt) == 1) {
-        count++;
-    }
-    db->backend->reset(stmt);
-    
-    void* instances = NULL;
-    if (count > 0) {
-        instances = corm_alloc_fn(db, field->related_model->struct_size * count);
-        if (!instances) {
-            CORM_LOG_ERROR("Failed to allocate instances array");
-            db->backend->finalize(stmt);
-            corm_arena_end_temp(tmp);
-            return false;
-        }
-        memset(instances, 0, field->related_model->struct_size * count);
-        
-        if (!corm_result_track(db, parent_result, instances)) {
-            CORM_LOG_ERROR("Failed to track instances array");
-            corm_free_fn(db, instances);
-            db->backend->finalize(stmt);
-            corm_arena_end_temp(tmp);
-            return false;
-        }
-    }
-    
-    int idx = 0;
-    while (db->backend->step(stmt) == 1 && idx < count) {
-        void* inst = (char*)instances + (idx * field->related_model->struct_size);
-        
-        for (uint64_t i = 0; i < field->related_model->field_count; i++) {
-            field_info_t* rel_field = &field->related_model->fields[i];
-            
-            if (rel_field->type == FIELD_TYPE_BELONGS_TO || 
-                rel_field->type == FIELD_TYPE_HAS_MANY) {
-                continue;
-            }
-            
-            void* field_ptr = (char*)inst + rel_field->offset;
-            
-            int col_idx = -1;
-            int col_count = db->backend->column_count(stmt);
-            for (int j = 0; j < col_count; j++) {
-                if (strcmp(db->backend->column_name(stmt, j), rel_field->name) == 0) {
-                    col_idx = j;
-                    break;
-                }
-            }
-            
-            if (col_idx == -1) {
-                CORM_LOG_WARN("Column '%s' not found in result set", rel_field->name);
-                continue;
-            }
-            
-            extract_field_from_column(db, parent_result, stmt, col_idx, field_ptr, rel_field->type);
-        }
-        
-        idx++;
-    }
-    
-    db->backend->finalize(stmt);
+    corm_result_t* result = corm_where_raw(db, field->related_model, 
+                                           (const char*)where_clause.str,
+                                           params, param_types, 1);
     corm_arena_end_temp(tmp);
     
     void* relation_ptr = (char*)instance + field->offset;
-    *(void**)relation_ptr = instances;
+	void* count_ptr = (char*)instance + field->count_offset;
+
+	if (result) {
+        *(void**)relation_ptr = result->data;
+        *(int*)count_ptr = result->count;
+    } else {
+        *(void**)relation_ptr = NULL;
+        *(int*)count_ptr = 0;
+    }
     
-    void* count_ptr = (char*)instance + field->count_offset;
-    *(int*)count_ptr = count;
-    
-    return true;
+    return result;
 }
 
 corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name) {
@@ -1303,7 +1231,7 @@ corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* insta
     
     if (!field) {
         CORM_LOG_ERROR("Field '%s' doesn't exist in %s", field_name, meta->table_name);
-        return false;
+        return NULL;
     }
     
     if (field->type == FIELD_TYPE_BELONGS_TO) {
@@ -1315,15 +1243,21 @@ corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* insta
     return NULL;
 }
 
-// TODO: Fool proof this shit
 void corm_free_result(corm_db_t* db, corm_result_t* result) {
     if (!result) return;
     
-    for (size_t i = 0; i < result->allocation_count; i++) {
-        corm_free_fn(db, result->allocations[i]);
+	if (result->allocations) {
+        for (size_t i = 0; i < result->allocation_count; i++) {
+            if (result->allocations[i]) {
+                corm_free_fn(db, result->allocations[i]);
+            }
+        }
+        corm_free_fn(db, result->allocations);
     }
     
-    corm_free_fn(db, result->allocations);
-    corm_free_fn(db, result->data);
+	if (result->data) {
+        corm_free_fn(db, result->data);
+    }
+
     corm_free_fn(db, result);
 }

@@ -4,14 +4,6 @@ An SQL ORM in C to piss off the java devs.
 
 No dependencies beyond the C standard library and whatever sql backend you wanna use. Define your models with macros, get CRUD and basic relation loading without writing SQL by hand.
 
-## Building
-
-Compile `corm.c` alongside your project. Ships with a SQLite backend by default, so link against it if that's what you're using:
-
-```sh
-gcc main.c corm.c -lsqlite3 -o myapp
-```
-
 ## Usage
 
 Define a struct, then describe it with `DEFINE_MODEL`:
@@ -54,26 +46,31 @@ corm_save(db, &User_model, &u);
 // u.id is now set from last insert id
 ```
 
-Query:
+Query with the query builder:
 
 ```c
-corm_result_t* res = corm_find(db, &User_model, &u.id);
-User* found = (User*)res->data;
-
-corm_result_t* all = corm_find_all(db, &User_model);
-User* users = (User*)all->data;
-for (int i = 0; i < all->count; i++) { ... }
-
+// all users
+corm_query_t* q = corm_query(db, &User_model);
+corm_result_t* res = corm_query_exec(q);
+User* users = (User*)res->data;
+for (int i = 0; i < res->count; i++) { ... }
 corm_free_result(db, res);
-```
 
-Raw where clause:
-
-```c
-void* params[] = { &age };
+// with filtering, ordering, limit
+int min_age = 18;
+void* params[] = { &min_age };
 field_type_e types[] = { FIELD_TYPE_INT };
-corm_result_t* res = corm_where_raw(db, &User_model, "age > ?", params, types, 1);
+
+corm_query_t* q = corm_query(db, &User_model);
+corm_query_where(q, "age > ?", params, types, 1);
+corm_query_order_by(q, "username ASC");
+corm_query_limit(q, 10);
+corm_query_offset(q, 20);
+corm_result_t* res = corm_query_exec(q);
+// q is freed by exec
 ```
+
+In corm we use `?` placeholders in where clauses, but they get translated to whatever your backend expects, so it works across backends without changing your code.
 
 Relations - belongs_to and has_many:
 
@@ -142,13 +139,24 @@ corm_close(db);
 
 Field flags: `PRIMARY_KEY`, `NOT_NULL`, `UNIQUE`, `AUTO_INC`. Combine with `|`.
 
-Validators are optional function pointers with signature `bool fn(void* value, const char** error_msg)`.
+Validators are optional function pointers with signature `bool fn(void* instance, void* value, const char** error_msg)`. You get the whole instance so you can do cross-field validation, and the field value directly so simple validators don't have to do offset math.
+
+```c
+bool validate_age(void* instance, void* value, const char** err) {
+    (void)instance;
+    if (*(int*)value < 0) {
+        *err = "age cannot be negative";
+        return false;
+    }
+    return true;
+}
+```
 
 ## Sync Modes
 
 - `CORM_SYNC_SAFE` - creates tables if they don't exist, does nothing otherwise
 - `CORM_SYNC_DROP` - drops and recreates all tables
-- `CORM_SYNC_MIGRATE` - adds missing columns (does not drop existing ones)
+- `CORM_SYNC_MIGRATE` - not implemented yet
 
 ## Custom Allocator
 

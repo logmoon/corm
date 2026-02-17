@@ -97,7 +97,8 @@ static inline corm_string_t corm_str_fmt(corm_arena_t* arena, const char* fmt, .
     if (len < 0) return (corm_string_t){0};
 
     uint8_t* data = (uint8_t*)corm_arena_alloc(arena, len + 1);
-    
+    if (!data) return (corm_string_t){0};
+
     va_start(args, fmt);
     vsnprintf((char*)data, len + 1, fmt, args);
     va_end(args);
@@ -109,20 +110,23 @@ static inline corm_string_t corm_str_fmt(corm_arena_t* arena, const char* fmt, .
 static inline corm_string_t corm_str_cat(corm_arena_t* arena, corm_string_t a, corm_string_t b) {
     uint64_t size = a.size + b.size;
     uint8_t* data = (uint8_t*)corm_arena_alloc(arena, size + 1);
-    
+    if (!data) return (corm_string_t){0};
+
     memcpy(data, a.str, a.size);
     memcpy(data + a.size, b.str, b.size);
     data[size] = 0;
-    
+
     return (corm_string_t){ data, size };
 }
 
 static inline const char* corm_str_to_c_safe(corm_arena_t* arena, corm_string_t s) {
-    if (s.str && s.str[s.size] == 0) {
+    if (!s.str) return NULL;
+    if (s.str[s.size] == 0) {
         return (const char*)s.str;
     }
-    
+
     uint8_t* data = (uint8_t*)corm_arena_alloc(arena, s.size + 1);
+    if (!data) return NULL;
     memcpy(data, s.str, s.size);
     data[s.size] = 0;
     return (const char*)data;
@@ -528,9 +532,10 @@ static corm_string_t corm_generate_create_table_sql(corm_db_t* db, model_meta_t*
         field_info_t* field = &meta->fields[i];
 
         if (field->type == FIELD_TYPE_BELONGS_TO) {
-            corm_string_t fk = corm_str_fmt(db->internal_arena, ", FOREIGN KEY (%s) REFERENCES %s(id)",
+            corm_string_t fk = corm_str_fmt(db->internal_arena, ", FOREIGN KEY (%s) REFERENCES %s(%s)",
                 field->fk_column_name,
-                field->target_model_name
+                field->target_model_name,
+                field->related_model->primary_key_field->name
             );
             
             switch(field->on_delete) {
@@ -635,7 +640,7 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         if (field->validator) {
             void* field_value = (char*)instance + field->offset;
             const char* error_msg = NULL;
-            if (!field->validator(field_value, &error_msg)) {
+            if (!field->validator(instance, field_value, &error_msg)) {
                 CORM_SET_ERROR(db, "Validation failed for field '%s': %s", 
                          field->name, error_msg ? error_msg : "Unknown error");
                 corm_arena_end_temp(tmp);
@@ -790,285 +795,200 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
     return true;
 }
 
-corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value) {
+corm_query_t* corm_query(corm_db_t* db, model_meta_t* meta) {
+    if (!db || !meta) return NULL;
+
+    corm_query_t* q = corm_alloc_fn(db, sizeof(corm_query_t));
+    if (!q) return NULL;
+
+    q->db          = db;
+    q->meta        = meta;
+    q->where_clause = NULL;
+    q->params      = NULL;
+    q->param_types = NULL;
+    q->param_count = 0;
+    q->order_by    = NULL;
+    q->limit       = -1;
+    q->offset      = 0;
+
+    return q;
+}
+
+void corm_query_where(corm_query_t* q, const char* clause,
+                      void** params, field_type_e* types, size_t count) {
+    q->where_clause = clause;
+    q->params       = params;
+    q->param_types  = types;
+    q->param_count  = count;
+}
+
+void corm_query_order_by(corm_query_t* q, const char* order_by) {
+    q->order_by = order_by;
+}
+
+void corm_query_limit(corm_query_t* q, int limit) {
+    q->limit = limit;
+}
+
+void corm_query_offset(corm_query_t* q, int offset) {
+    q->offset = offset;
+}
+
+corm_result_t* corm_query_exec(corm_query_t* q) {
+    if (!q) return NULL;
+
+    corm_db_t*    db   = q->db;
+    model_meta_t* meta = q->meta;
+
     corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
-    
-    const char* placeholder = db->backend->get_placeholder(1);
-    corm_string_t sql = corm_str_fmt(db->internal_arena, 
-                                     "SELECT * FROM %s WHERE %s = %s;",
-                                     meta->table_name,
-                                     meta->primary_key_field->name,
-                                     placeholder);
-    
-    corm_backend_stmt_t stmt;
-    char* error = NULL;
-    if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_SET_ERROR(db, "Failed to prepare SELECT: %s", error ? error : "unknown error");
-        if (error) free(error);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    if (!bind_param_by_type(db, stmt, 1, pk_value, meta->primary_key_field->type)) {
-        CORM_SET_ERROR(db, "Failed to bind primary key");
-        db->backend->finalize(stmt);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    int result = db->backend->step(stmt);
-    
-    if (result != 1) {
-        db->backend->finalize(stmt);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    corm_result_t* res = corm_result_create(db, meta);
-    if (!res) {
-        db->backend->finalize(stmt);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    void* instance = corm_alloc_fn(db, meta->struct_size);
-    if (!instance) {
-        corm_free_fn(db, res->allocations);
-        corm_free_fn(db, res);
-        db->backend->finalize(stmt);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    memset(instance, 0, meta->struct_size);
-    
-    res->data = instance;
-    res->count = 1;
-    
-    for (uint64_t i = 0; i < meta->field_count; i++) {
-        field_info_t* field = &meta->fields[i];
-        
-        if (field->type == FIELD_TYPE_BELONGS_TO || field->type == FIELD_TYPE_HAS_MANY) {
-            continue;
-        }
-        
-        void* field_ptr = (char*)instance + field->offset;
-        
-        int col_idx = -1;
-        int col_count = db->backend->column_count(stmt);
-        for (int j = 0; j < col_count; j++) {
-            if (strcmp(db->backend->column_name(stmt, j), field->name) == 0) {
-                col_idx = j;
+
+    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s", meta->table_name);
+
+    if (q->where_clause) {
+        // translate each ? to the backend's placeholder
+        corm_string_t where = CORM_STR_LIT("");
+        const char* cur = q->where_clause;
+        int param_idx = 1;
+        while (*cur) {
+            const char* next = strchr(cur, '?');
+            if (!next) {
+                where = corm_str_cat(db->internal_arena, where,
+                        (corm_string_t){ (uint8_t*)cur, (uint64_t)strlen(cur) });
                 break;
             }
+            where = corm_str_cat(db->internal_arena, where,
+                    (corm_string_t){ (uint8_t*)cur, (uint64_t)(next - cur) });
+            const char* ph = db->backend->get_placeholder(param_idx++);
+            where = corm_str_cat(db->internal_arena, where,
+                    (corm_string_t){ (uint8_t*)ph, (uint64_t)strlen(ph) });
+            cur = next + 1;
         }
-        
-        if (col_idx == -1) continue;
-        
-        extract_field_from_column(db, res, stmt, col_idx, field_ptr, field->type);
+        sql = corm_str_cat(db->internal_arena, sql,
+              corm_str_fmt(db->internal_arena, " WHERE %.*s", (int)where.size, where.str));
     }
-    
-    db->backend->finalize(stmt);
-    corm_arena_end_temp(tmp);
-    
-    return res;
-}
 
-corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta) {
-    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
-    
-    corm_string_t count_sql = corm_str_fmt(db->internal_arena, "SELECT COUNT(*) FROM %s;", meta->table_name);
-    
-    corm_backend_stmt_t count_stmt;
-    char* error = NULL;
-    if (!db->backend->prepare(db->backend_conn, &count_stmt, corm_str_to_c_safe(db->internal_arena, count_sql), &error)) {
-        CORM_SET_ERROR(db, "Failed to prepare count query: %s", error ? error : "unknown");
-        if (error) free(error);
-        corm_arena_end_temp(tmp);
-        return NULL;
+    if (q->order_by) {
+        sql = corm_str_cat(db->internal_arena, sql,
+              corm_str_fmt(db->internal_arena, " ORDER BY %s", q->order_by));
     }
-    
-    int record_count = 0;
-    if (db->backend->step(count_stmt) == 1) {
-        record_count = db->backend->column_int(count_stmt, 0);
-    }
-    db->backend->finalize(count_stmt);
-    
-    if (record_count == 0) {
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    corm_result_t* res = corm_result_create(db, meta);
-    if (!res) {
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    void* instances = corm_alloc_fn(db, meta->struct_size * record_count);
-    if (!instances) {
-        corm_free_fn(db, res->allocations);
-        corm_free_fn(db, res);
-        CORM_SET_ERROR(db, "Failed to allocate instances array");
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    memset(instances, 0, meta->struct_size * record_count);
-    
-    res->data = instances;
-    res->count = record_count;
-    
-    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s;", meta->table_name);
-    
-    corm_backend_stmt_t stmt;
-    if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_SET_ERROR(db, "Failed to prepare find_all query: %s", error ? error : "unknown");
-        if (error) free(error);
-        corm_free_fn(db, instances);
-        corm_free_fn(db, res->allocations);
-        corm_free_fn(db, res);
-        corm_arena_end_temp(tmp);
-        return NULL;
-    }
-    
-    int idx = 0;
-    while (db->backend->step(stmt) == 1 && idx < record_count) {
-        void* instance = (char*)instances + (idx * meta->struct_size);
-        
-        for (uint64_t i = 0; i < meta->field_count; i++) {
-            field_info_t* field = &meta->fields[i];
-            
-            if (field->type == FIELD_TYPE_BELONGS_TO || 
-                field->type == FIELD_TYPE_HAS_MANY) {
-                continue;
-            }
-            
-            void* field_ptr = (char*)instance + field->offset;
-            
-            int col_idx = -1;
-            int col_count = db->backend->column_count(stmt);
-            for (int j = 0; j < col_count; j++) {
-                if (strcmp(db->backend->column_name(stmt, j), field->name) == 0) {
-                    col_idx = j;
-                    break;
-                }
-            }
-            
-            if (col_idx == -1) {
-                continue;
-            }
-            
-            extract_field_from_column(db, res, stmt, col_idx, field_ptr, field->type);
-        }
-        
-        idx++;
-    }
-    
-    db->backend->finalize(stmt);
-    corm_arena_end_temp(tmp);
-    
-    return res;
-}
 
-corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, 
-                     void** params, field_type_e* param_types, size_t param_count) {
-    if (!db || !meta || !where_clause) {
-        CORM_SET_ERROR(db, "Invalid arguments to corm_where_raw");
-        return NULL;
+    if (q->limit != -1 || q->offset > 0) {
+        const char* limit_str = db->backend->get_limit_syntax(q->limit, q->offset);
+        sql = corm_str_cat(db->internal_arena, sql,
+              corm_str_fmt(db->internal_arena, " %s", limit_str));
     }
-    
-    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
-    
-    corm_string_t sql = corm_str_fmt(db->internal_arena, "SELECT * FROM %s WHERE %s;", 
-                           meta->table_name, where_clause);
-    
+
+    sql = corm_str_cat(db->internal_arena, sql, CORM_STR_LIT(";"));
+
     corm_backend_stmt_t stmt;
     char* error = NULL;
     if (!db->backend->prepare(db->backend_conn, &stmt, corm_str_to_c_safe(db->internal_arena, sql), &error)) {
-        CORM_SET_ERROR(db, "Failed to prepare WHERE query: %s", error ? error : "unknown");
+        CORM_SET_ERROR(db, "Failed to prepare query: %s", error ? error : "unknown");
         if (error) free(error);
+        corm_free_fn(db, q);
         corm_arena_end_temp(tmp);
         return NULL;
     }
-    
-    for (size_t i = 0; i < param_count; i++) {
-        if (!bind_param_by_type(db, stmt, i + 1, params[i], param_types[i])) {
+
+    for (size_t i = 0; i < q->param_count; i++) {
+        if (!bind_param_by_type(db, stmt, (int)(i + 1), q->params[i], q->param_types[i])) {
             CORM_SET_ERROR(db, "Failed to bind parameter %zu", i);
             db->backend->finalize(stmt);
+            corm_free_fn(db, q);
             corm_arena_end_temp(tmp);
             return NULL;
         }
     }
-    
-    int result_count = 0;
-    while (db->backend->step(stmt) == 1) {
-        result_count++;
-    }
-    
-    if (result_count == 0) {
+
+    int col_count = db->backend->column_count(stmt);
+    int* col_map = corm_arena_alloc(db->internal_arena, sizeof(int) * meta->field_count);
+    if (!col_map) {
         db->backend->finalize(stmt);
+        corm_free_fn(db, q);
         corm_arena_end_temp(tmp);
         return NULL;
     }
-    
-    db->backend->reset(stmt);
-    
+
+    for (uint64_t i = 0; i < meta->field_count; i++) {
+        col_map[i] = -1;
+        if (meta->fields[i].type == FIELD_TYPE_BELONGS_TO ||
+            meta->fields[i].type == FIELD_TYPE_HAS_MANY) continue;
+
+        for (int j = 0; j < col_count; j++) {
+            if (strcmp(db->backend->column_name(stmt, j), meta->fields[i].name) == 0) {
+                col_map[i] = j;
+                break;
+            }
+        }
+    }
+
     corm_result_t* res = corm_result_create(db, meta);
     if (!res) {
         db->backend->finalize(stmt);
+        corm_free_fn(db, q);
         corm_arena_end_temp(tmp);
         return NULL;
     }
-    
-    void* instances = corm_alloc_fn(db, meta->struct_size * result_count);
+
+    size_t capacity = 16;
+    void* instances = corm_alloc_fn(db, meta->struct_size * capacity);
     if (!instances) {
         CORM_SET_ERROR(db, "Failed to allocate instances array");
         corm_free_fn(db, res->allocations);
         corm_free_fn(db, res);
         db->backend->finalize(stmt);
+        corm_free_fn(db, q);
         corm_arena_end_temp(tmp);
         return NULL;
     }
-    memset(instances, 0, meta->struct_size * result_count);
-    
-    res->data = instances;
-    res->count = result_count;
-    
-    int idx = 0;
-    while (db->backend->step(stmt) == 1 && idx < result_count) {
-        void* inst = (char*)instances + (idx * meta->struct_size);
-        
-        for (uint64_t i = 0; i < meta->field_count; i++) {
-            field_info_t* field = &meta->fields[i];
-            
-            if (field->type == FIELD_TYPE_BELONGS_TO || 
-                field->type == FIELD_TYPE_HAS_MANY) {
-                continue;
+
+    size_t count = 0;
+    while (db->backend->step(stmt) == 1) {
+        if (count >= capacity) {
+            size_t new_cap = capacity * 2;
+            void* grown = corm_alloc_fn(db, meta->struct_size * new_cap);
+            if (!grown) {
+                CORM_SET_ERROR(db, "Failed to grow instances array");
+                corm_free_fn(db, instances);
+                corm_free_fn(db, res->allocations);
+                corm_free_fn(db, res);
+                db->backend->finalize(stmt);
+                corm_free_fn(db, q);
+                corm_arena_end_temp(tmp);
+                return NULL;
             }
-            
-            void* field_ptr = (char*)inst + field->offset;
-            
-            int col_idx = -1;
-            int col_count = db->backend->column_count(stmt);
-            for (int j = 0; j < col_count; j++) {
-                if (strcmp(db->backend->column_name(stmt, j), field->name) == 0) {
-                    col_idx = j;
-                    break;
-                }
-            }
-            
-            if (col_idx == -1) {
-                continue;
-            }
-            
-            extract_field_from_column(db, res, stmt, col_idx, field_ptr, field->type);
+            memcpy(grown, instances, meta->struct_size * count);
+            corm_free_fn(db, instances);
+            instances = grown;
+            capacity  = new_cap;
         }
-        
-        idx++;
+
+        void* inst = (char*)instances + (count * meta->struct_size);
+        memset(inst, 0, meta->struct_size);
+
+        for (uint64_t i = 0; i < meta->field_count; i++) {
+            if (col_map[i] == -1) continue;
+            void* field_ptr = (char*)inst + meta->fields[i].offset;
+            extract_field_from_column(db, res, stmt, col_map[i], field_ptr, meta->fields[i].type);
+        }
+
+        count++;
     }
-    
+
     db->backend->finalize(stmt);
+    corm_free_fn(db, q);
     corm_arena_end_temp(tmp);
-    
+
+    if (count == 0) {
+        corm_free_fn(db, instances);
+        corm_free_fn(db, res->allocations);
+        corm_free_fn(db, res);
+        return NULL;
+    }
+
+    res->data  = instances;
+    res->count = (int)count;
+
     return res;
 }
 
@@ -1165,16 +1085,33 @@ static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_
         return NULL;
     }
     
-    corm_result_t* related_result = corm_find(db, field->related_model, fk_value_ptr);
-    
+    corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
+
+    const char* placeholder = db->backend->get_placeholder(1);
+    corm_string_t where = corm_str_fmt(db->internal_arena, "%s = %s",
+                                       field->related_model->primary_key_field->name,
+                                       placeholder);
+
+    void* params[]          = { fk_value_ptr };
+    field_type_e types[]    = { fk_field->type };
+
+    corm_query_t* q = corm_query(db, field->related_model);
+    if (!q) {
+        corm_arena_end_temp(tmp);
+        return NULL;
+    }
+
+    corm_query_where(q, (const char*)where.str, params, types, 1);
+    corm_result_t* related_result = corm_query_exec(q);
+
+    corm_arena_end_temp(tmp);
+
     if (!related_result) {
         return NULL;
     }
-    
-    void* related_instance = related_result->data;
-    
+
     void* relation_ptr = (char*)instance + field->offset;
-    *(void**)relation_ptr = related_instance;
+    *(void**)relation_ptr = related_result->data;
 
     return related_result;
 }
@@ -1191,16 +1128,24 @@ static corm_result_t* corm_load_has_many(corm_db_t* db, void* instance, model_me
 
     corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
 
-	const char* placeholder = db->backend->get_placeholder(1);
-    corm_string_t where_clause = corm_str_fmt(db->internal_arena, "%s = %s", 
-                                              field->fk_column_name, placeholder);
-    
-    void* params[] = { pk_value };
-    field_type_e param_types[] = { meta->primary_key_field->type };
-    
-    corm_result_t* result = corm_where_raw(db, field->related_model, 
-                                           (const char*)where_clause.str,
-                                           params, param_types, 1);
+    const char* placeholder = db->backend->get_placeholder(1);
+    corm_string_t where = corm_str_fmt(db->internal_arena, "%s = %s",
+                                       field->fk_column_name, placeholder);
+
+    void* params[]          = { pk_value };
+    field_type_e types[]    = { meta->primary_key_field->type };
+
+    corm_query_t* q = corm_query(db, field->related_model);
+    if (!q) {
+        corm_arena_end_temp(tmp);
+        *(void**)((char*)instance + field->offset)          = NULL;
+        *(int*)((char*)instance + field->count_offset)      = 0;
+        return NULL;
+    }
+
+    corm_query_where(q, (const char*)where.str, params, types, 1);
+    corm_result_t* result = corm_query_exec(q);
+
     corm_arena_end_temp(tmp);
     
     void* relation_ptr = (char*)instance + field->offset;

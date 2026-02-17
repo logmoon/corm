@@ -1,6 +1,7 @@
 #include "corm_backend.h"
 #include "corm.h"
 
+// Uses the cached sqlite3
 #include "thirdparty/sqlite/sqlite3.h"
 
 #include <string.h>
@@ -221,7 +222,9 @@ static bool sqlite_supports_returning() {
 
 static const char* sqlite_get_limit_syntax(int limit, int offset) {
     static char buf[64];
-    if (offset > 0) {
+    if (offset > 0 && limit == -1) {
+        snprintf(buf, sizeof(buf), "LIMIT -1 OFFSET %d", offset);
+    } else if (offset > 0) {
         snprintf(buf, sizeof(buf), "LIMIT %d OFFSET %d", limit, offset);
     } else {
         snprintf(buf, sizeof(buf), "LIMIT %d", limit);

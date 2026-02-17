@@ -48,7 +48,7 @@ typedef enum {
 
 typedef struct model_meta_t model_meta_t;
 
-typedef bool (*validator_fn)(void* value, const char** error_msg);
+typedef bool (*validator_fn)(void* instance, void* value, const char** error_msg);
 
 typedef struct field_info_t {
     const char* name;
@@ -223,9 +223,26 @@ bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
 bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value);
 
-corm_result_t* corm_find(corm_db_t* db, model_meta_t* meta, void* pk_value);
-corm_result_t* corm_find_all(corm_db_t* db, model_meta_t* meta);
-corm_result_t* corm_where_raw(corm_db_t* db, model_meta_t* meta, const char* where_clause, void** params, field_type_e* param_types, size_t param_count);
+typedef struct corm_query_t {
+    corm_db_t*    db;
+    model_meta_t* meta;
+
+    const char*   where_clause;
+    void**        params;
+    field_type_e* param_types;
+    size_t        param_count;
+
+    const char*   order_by;
+    int           limit;
+    int           offset;
+} corm_query_t;
+
+corm_query_t*  corm_query(corm_db_t* db, model_meta_t* meta);
+void           corm_query_where(corm_query_t* q, const char* clause, void** params, field_type_e* types, size_t count);
+void           corm_query_order_by(corm_query_t* q, const char* order_by);
+void           corm_query_limit(corm_query_t* q, int limit);
+void           corm_query_offset(corm_query_t* q, int offset);
+corm_result_t* corm_query_exec(corm_query_t* q);
 
 corm_result_t* corm_load_relation(corm_db_t* db, model_meta_t* meta, void* instance, const char* field_name);
 

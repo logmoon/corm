@@ -123,15 +123,7 @@ typedef enum {
 #define _BASE_FIELD(stype, fname, ftype) \
     .name = #fname, \
     .offset = offsetof(stype, fname), \
-    .type = ftype, \
-    .flags = 0, \
-    .max_length = 0, \
-    .validator = NULL, \
-    .target_model_name = NULL, \
-    .fk_column_name = NULL, \
-    .count_offset = 0, \
-    .on_delete = FK_NO_ACTION, \
-    .related_model = NULL
+    .type = ftype
 
 #define _F_INT_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT) }
 #define _F_INT_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags }
@@ -173,8 +165,15 @@ typedef enum {
 #define _F_BLOB_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags, .validator = fval }
 #define F_BLOB(...) _DISPATCH(_F_BLOB_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
-#define F_BELONGS_TO(stype, fname, target, fk) \
-    { _BASE_FIELD(stype, fname, FIELD_TYPE_BELONGS_TO), .target_model_name = #target, .fk_column_name = #fk }
+#define _F_BELONGS_TO_4(stype, fname, target, fk) \
+    { _BASE_FIELD(stype, fname, FIELD_TYPE_BELONGS_TO), \
+      .target_model_name = #target, .fk_column_name = #fk }
+
+#define _F_BELONGS_TO_5(stype, fname, target, fk, del_action) \
+    { _BASE_FIELD(stype, fname, FIELD_TYPE_BELONGS_TO), \
+      .target_model_name = #target, .fk_column_name = #fk, .on_delete = del_action }
+
+#define F_BELONGS_TO(...) _DISPATCH(_F_BELONGS_TO_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define MANY(name) \
     int name##_count; \

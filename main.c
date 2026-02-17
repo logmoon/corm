@@ -82,7 +82,6 @@ int main() {
 		return 1;
 	}
 	printf("Loaded user relation, username: %s\n", post.user->username);
-	
 	corm_free_result(db, user_result);
 
 	return 0;

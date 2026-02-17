@@ -10,6 +10,8 @@ typedef struct {
 } User;
 
 bool verify_email(void* email, const char** error_msg) {
+	(void)email;
+	(void)error_msg;
 	return true;
 }
 

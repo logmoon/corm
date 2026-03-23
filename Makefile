@@ -1,30 +1,39 @@
-CC = gcc
-CFLAGS = -Iinclude -I. -Wall -Wextra
-LIBS = -lm -lpthread
+CC      = gcc
+AR      = ar
+CFLAGS  = -Iinclude -I. -Wall -Wextra
+LIBS    = -lm -lpthread
 
-MAIN_OBJ = main.o
-CORE_OBJ = src/corm.o
+CORE_OBJ    = src/corm.o
 BACKEND_OBJ = backends/sqlite/corm_backend_sqlite.o
-SQLITE_OBJ = thirdparty/sqlite/sqlite3.o
+SQLITE_OBJ  = thirdparty/sqlite/sqlite3.o
 
-OBJS = $(CORE_OBJ) $(BACKEND_OBJ) $(SQLITE_OBJ)
+LIB_OBJS = $(CORE_OBJ) $(BACKEND_OBJ) $(SQLITE_OBJ)
+LIB_OUT  = lib/libcorm.a
 
-main: $(MAIN_OBJ) $(OBJS)
-	$(CC) $(CFLAGS) -o corm $(MAIN_OBJ) $(OBJS) $(LIBS)
+DEMO_SRC = main.c
+DEMO_OUT = demo
 
-main.o: main.c include/corm.h
-	$(CC) $(CFLAGS) -c main.c -o main.o
+.PHONY: all lib demo clean
+
+all: lib demo
+
+lib: $(LIB_OUT)
+
+$(LIB_OUT): $(LIB_OBJS)
+	mkdir -p lib
+	$(AR) rcs $@ $^
+
+demo: $(DEMO_SRC) $(LIB_OUT)
+	$(CC) $(CFLAGS) -o $(DEMO_OUT) $(DEMO_SRC) -Llib -lcorm $(LIBS)
 
 src/corm.o: src/corm.c include/corm.h include/corm_backend.h
-	$(CC) $(CFLAGS) -c src/corm.c -o src/corm.o
+	$(CC) $(CFLAGS) -c $< -o $@
 
 backends/sqlite/corm_backend_sqlite.o: backends/sqlite/corm_backend_sqlite.c include/corm_backend.h include/corm.h
-	$(CC) $(CFLAGS) -c backends/sqlite/corm_backend_sqlite.c -o backends/sqlite/corm_backend_sqlite.o
+	$(CC) $(CFLAGS) -c $< -o $@
 
 thirdparty/sqlite/sqlite3.o: thirdparty/sqlite/sqlite3.c thirdparty/sqlite/sqlite3.h
-	$(CC) -c thirdparty/sqlite/sqlite3.c -o thirdparty/sqlite/sqlite3.o
+	$(CC) -c $< -o $@
 
 clean:
-	rm -f corm.exe corm *.db $(MAIN_OBJ) $(OBJS)
-
-.PHONY: clean
+	rm -f $(LIB_OUT) $(DEMO_OUT) *.db $(LIB_OBJS)

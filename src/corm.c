@@ -635,12 +635,13 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
         return false;
     }
 
+	// Validators first
     for (uint64_t i = 0; i < meta->field_count; i++) {
         field_info_t* field = &meta->fields[i];
         if (field->validator) {
             void* field_value = (char*)instance + field->offset;
             const char* error_msg = NULL;
-            if (!field->validator(instance, field_value, &error_msg)) {
+            if (!field->validator(instance, field_value, &error_msg, field->validator_userdata)) {
                 CORM_SET_ERROR(db, "Validation failed for field '%s': %s", 
                          field->name, error_msg ? error_msg : "Unknown error");
                 corm_arena_end_temp(tmp);
@@ -648,6 +649,14 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
             }
         }
     }
+
+	// Then the hook
+	if (meta->pre_save.callback) {
+		if (!meta->pre_save.callback(db, instance, meta->pre_save.userdata)) {
+			CORM_SET_ERROR(db, "Operation cancelled by %s pre_save hook", meta->table_name);
+			return false;
+		}
+	}
     
     void* pk_value = (char*)instance + pk_field->offset;
     bool is_update = corm_record_exists(db, meta, pk_field, pk_value);
@@ -792,6 +801,11 @@ bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance) {
     
     db->backend->finalize(stmt);
     corm_arena_end_temp(tmp);
+
+	if (meta->post_save.callback) {
+		meta->post_save.callback(db, instance, meta->post_save.userdata);
+	}
+
     return true;
 }
 
@@ -992,8 +1006,8 @@ corm_result_t* corm_query_exec(corm_query_t* q) {
     return res;
 }
 
-bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
-    if (!db || !meta || !pk_value) {
+bool corm_delete(corm_db_t* db, model_meta_t* meta, void* instance) {
+    if (!db || !meta || !instance) {
         CORM_SET_ERROR(db, "Invalid arguments to corm_delete");
         return false;
     }
@@ -1004,6 +1018,13 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
     }
     
     corm_temp_t tmp = corm_arena_start_temp(db->internal_arena);
+
+	if (meta->pre_delete.callback) {
+		if (!meta->pre_delete.callback(db, instance, meta->pre_delete.userdata)) {
+			CORM_SET_ERROR(db, "Operation cancelled by %s pre_delete hook", meta->table_name);
+			return false;
+		}
+	}
     
     const char* placeholder = db->backend->get_placeholder(1);
     corm_string_t sql = corm_str_fmt(db->internal_arena, "DELETE FROM %s WHERE %s = %s;",
@@ -1018,6 +1039,7 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
         return false;
     }
     
+    void* pk_value = (char*)instance + meta->primary_key_field->offset;
     if (!bind_param_by_type(db, stmt, 1, pk_value, meta->primary_key_field->type)) {
         CORM_SET_ERROR(db, "Failed to bind primary key");
         db->backend->finalize(stmt);
@@ -1034,8 +1056,25 @@ bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value) {
         CORM_SET_ERROR(db, "Failed to execute DELETE: %s", backend_err ? backend_err : "unknown error");
         return false;
     }
+
+	if (meta->post_delete.callback) {
+		meta->post_delete.callback(db, instance, meta->post_delete.userdata);
+	}
     
     return true;
+}
+
+void corm_set_save_hooks(model_meta_t* meta, corm_pre_hook_fn pre, void* pre_ctx,
+						 corm_post_hook_fn post, void* post_ctx) {
+	if (!meta) return;
+    meta->pre_save = (corm_pre_handler_t){ .callback = pre, .userdata = pre_ctx };
+    meta->post_save = (corm_post_handler_t){ .callback = post, .userdata = post_ctx };
+}
+void corm_set_delete_hooks(model_meta_t* meta, corm_pre_hook_fn pre, void* pre_ctx, 
+                           corm_post_hook_fn post, void* post_ctx) {
+	if (!meta) return;
+    meta->pre_delete = (corm_pre_handler_t){ .callback = pre, .userdata = pre_ctx };
+    meta->post_delete = (corm_post_handler_t){ .callback = post, .userdata = post_ctx };
 }
 
 static corm_result_t* corm_load_belongs_to(corm_db_t* db, void* instance, model_meta_t* meta,

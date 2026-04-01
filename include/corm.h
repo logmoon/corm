@@ -48,7 +48,7 @@ typedef enum {
 
 typedef struct model_meta_t model_meta_t;
 
-typedef bool (*validator_fn)(void* instance, void* value, const char** error_msg);
+typedef bool (*corm_validator_fn)(void* instance, void* value, const char** error_msg, void* userdata);
 
 typedef struct field_info_t {
     const char* name;
@@ -57,7 +57,9 @@ typedef struct field_info_t {
 
     int flags;
     size_t max_length;
-    validator_fn validator;
+
+    corm_validator_fn validator;
+	void* validator_userdata;
 
     const char* target_model_name;
     const char* fk_column_name;
@@ -66,12 +68,30 @@ typedef struct field_info_t {
     model_meta_t* related_model;
 } field_info_t;
 
+// pre hook can cancel the operation
+typedef bool (*corm_pre_hook_fn)(corm_db_t* db, void* instance, void* userdata);
+typedef void (*corm_post_hook_fn)(corm_db_t* db, void* instance, void* userdata);
+
+typedef struct {
+    corm_pre_hook_fn callback;
+    void* userdata;
+} corm_pre_handler_t;
+
+typedef struct {
+    corm_post_hook_fn callback;
+    void* userdata;
+} corm_post_handler_t;
+
 typedef struct model_meta_t {
     const char* table_name;
     size_t struct_size;
     field_info_t* fields;
     size_t field_count;
     field_info_t* primary_key_field;
+	corm_pre_handler_t pre_save;
+    corm_post_handler_t post_save;
+    corm_pre_handler_t pre_delete;
+    corm_post_handler_t post_delete;
 } model_meta_t;
 
 typedef struct {
@@ -127,42 +147,50 @@ typedef enum {
 
 #define _F_INT_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT) }
 #define _F_INT_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags }
-#define _F_INT_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags, .validator = fval }
+#define _F_INT_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_INT_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_INT(...) _DISPATCH(_F_INT_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_INT64_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT64) }
 #define _F_INT64_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT64), .flags = fflags }
-#define _F_INT64_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT64), .flags = fflags, .validator = fval }
+#define _F_INT64_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT64), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_INT64_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_INT64), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_INT64(...) _DISPATCH(_F_INT64_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_FLOAT_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_FLOAT) }
 #define _F_FLOAT_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_FLOAT), .flags = fflags }
-#define _F_FLOAT_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_FLOAT), .flags = fflags, .validator = fval }
+#define _F_FLOAT_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_FLOAT), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_FLOAT_5(stype, fname, fflags, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_FLOAT), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_FLOAT(...) _DISPATCH(_F_FLOAT_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_DOUBLE_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_DOUBLE) }
 #define _F_DOUBLE_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_DOUBLE), .flags = fflags }
-#define _F_DOUBLE_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_DOUBLE), .flags = fflags, .validator = fval }
+#define _F_DOUBLE_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_DOUBLE), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_DOUBLE_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_DOUBLE), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_DOUBLE(...) _DISPATCH(_F_DOUBLE_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_STRING_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING) }
 #define _F_STRING_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .flags = fflags }
-#define _F_STRING_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .flags = fflags, .validator = fval }
+#define _F_STRING_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_STRING_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_STRING(...) _DISPATCH(_F_STRING_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_STRING_LEN_3(stype, fname, max_len) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .max_length = max_len }
 #define _F_STRING_LEN_4(stype, fname, max_len, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .max_length = max_len, .flags = fflags }
-#define _F_STRING_LEN_5(stype, fname, max_len, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .max_length = max_len, .flags = fflags, .validator = fval }
+#define _F_STRING_LEN_5(stype, fname, max_len, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .max_length = max_len, .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_STRING_LEN_6(stype, fname, max_len, fflags, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_STRING), .max_length = max_len, .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_STRING_LEN(...) _DISPATCH(_F_STRING_LEN_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_BOOL_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_BOOL) }
 #define _F_BOOL_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_BOOL), .flags = fflags }
-#define _F_BOOL_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BOOL), .flags = fflags, .validator = fval }
+#define _F_BOOL_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BOOL), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_BOOL_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_BOOL), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_BOOL(...) _DISPATCH(_F_BOOL_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_BLOB_2(stype, fname) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB) }
 #define _F_BLOB_3(stype, fname, fflags) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags }
-#define _F_BLOB_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags, .validator = fval }
+#define _F_BLOB_4(stype, fname, fflags, fval) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags, .validator = fval, .validator_userdata = NULL }
+#define _F_BLOB_5(stype, fname, fflags, fval, fval_data) { _BASE_FIELD(stype, fname, FIELD_TYPE_BLOB), .flags = fflags, .validator = fval, .validator_userdata = fval_data }
 #define F_BLOB(...) _DISPATCH(_F_BLOB_, _NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define _F_BELONGS_TO_4(stype, fname, target, fk) \
@@ -221,7 +249,14 @@ bool corm_register_model(corm_db_t* db, model_meta_t* meta);
 bool corm_sync(corm_db_t* db, corm_sync_mode_e mode);
 
 bool corm_save(corm_db_t* db, model_meta_t* meta, void* instance);
-bool corm_delete(corm_db_t* db, model_meta_t* meta, void* pk_value);
+bool corm_delete(corm_db_t* db, model_meta_t* meta, void* instance);
+
+void corm_set_save_hooks(model_meta_t* meta, 
+                         corm_pre_hook_fn pre, void* pre_ctx, 
+                         corm_post_hook_fn post, void* post_ctx);
+void corm_set_delete_hooks(model_meta_t* meta, 
+                           corm_pre_hook_fn pre, void* pre_ctx, 
+                           corm_post_hook_fn post, void* post_ctx);
 
 typedef struct corm_query_t {
     corm_db_t*    db;

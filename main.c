@@ -9,11 +9,26 @@ typedef struct {
     bool is_active;
 } User;
 
-bool verify_email(void* instance, void* email, const char** error_msg) {
+bool verify_email(void* instance, void* email, const char** error_msg, void* userdata) {
 	(void)instance;
     (void)email;
     (void)error_msg;
+	(void)userdata;
     return true;
+}
+
+bool user_pre_save(corm_db_t* db, void* instance, void* userdata) {
+	(void)db;
+	(void)instance;
+	(void)userdata;
+	printf("PRE SAVE\n");
+	return true;
+}
+void user_post_save(corm_db_t* db, void* instance, void* userdata) {
+	(void)db;
+	(void)instance;
+	(void)userdata;
+	printf("POST SAVE\n");
 }
 
 DEFINE_MODEL(User, User,
@@ -49,6 +64,8 @@ int main() {
         corm_close(db);
         return 1;
     }
+
+	corm_set_save_hooks(&User_model, user_pre_save, NULL, user_post_save, NULL);
 
     if (!corm_sync(db, CORM_SYNC_DROP)) {
         printf("Sync error: %s\n", corm_get_last_error(db));

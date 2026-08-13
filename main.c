@@ -55,12 +55,23 @@ DEFINE_MODEL(Post, Post,
     F_BELONGS_TO(Post, user, User, user_id)
 );
 
+typedef struct {
+	char* id;
+	char* title;
+} Test;
+
+DEFINE_MODEL(Test, Test,
+    F_STRING(Test, id, PRIMARY_KEY),
+    F_STRING(Test, title, NOT_NULL)
+);
+
 int main() {
     corm_db_t* db = corm_init("main.db");
     if (!db) return 1;
 
     if (!corm_register_model(db, &User_model) ||
-        !corm_register_model(db, &Post_model)) {
+        !corm_register_model(db, &Post_model) ||
+		!corm_register_model(db, &Test_model)) {
         corm_close(db);
         return 1;
     }
@@ -71,6 +82,25 @@ int main() {
         printf("Sync error: %s\n", corm_get_last_error(db));
         corm_close(db);
         return 1;
+    }
+
+	Test t = { .id = "ideez", .title = "title" };
+	if (!corm_save(db, &Test_model, &t)) {
+		printf("Save error: %s\n", corm_get_last_error(db));
+		corm_close(db);
+		return 1;
+	}
+	printf("Saved test\n");
+
+    corm_query_t* qt = corm_query(db, &Test_model);
+    corm_result_t* all_tests = corm_query_exec(qt);
+    if (all_tests) {
+        printf("\nAll tests:\n");
+        Test* found = (Test*)all_tests->data;
+        for (int i = 0; i < all_tests->count; i++) {
+            printf("  [%s] %s\n", found[i].id, found[i].title);
+        }
+        corm_free_result(db, all_tests);
     }
 
     User users[] = {

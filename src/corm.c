@@ -240,6 +240,7 @@ corm_db_t* corm_init_with_backend_and_allocator(const corm_backend_ops_t* backen
     
     db->model_count = 0;
     db->model_capacity = CORM_MAX_MODELS;
+	memset(db->last_error, 0, sizeof(db->last_error));
     
     db->models = corm_alloc_fn(db, sizeof(model_meta_t*) * CORM_MAX_MODELS);
     if (db->models == NULL) {

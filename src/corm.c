@@ -996,9 +996,9 @@ corm_result_t* corm_query_exec(corm_query_t* q) {
 
     if (count == 0) {
         corm_free_fn(db, instances);
-        corm_free_fn(db, res->allocations);
-        corm_free_fn(db, res);
-        return NULL;
+        res->data  = NULL;
+        res->count = 0;
+        return res;
     }
 
     res->data  = instances;
